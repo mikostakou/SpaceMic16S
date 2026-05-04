@@ -7,11 +7,12 @@
 # - Combine ASV table, taxonomy table, and metadata into a phyloseq object
 # - Export OTU abundance, taxonomy, and metadata tables
 # - Summarize sequencing depth per sample
-# - Rarefy the phyloseq object to 8000 reads per sample
+# - Rarefy the phyloseq object to the selected sequencing depth
 
 library(phyloseq)
 library(openxlsx)
 
+# Rarefaction depth selected after inspecting sequencing depth distributions.
 sample_depth <- 8000
 seed <- 1
 
