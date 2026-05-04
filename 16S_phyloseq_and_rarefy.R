@@ -8,19 +8,6 @@
 # - Export OTU abundance, taxonomy, and metadata tables
 # - Summarize sequencing depth per sample
 # - Rarefy the phyloseq object to 8000 reads per sample
-#
-# Input:
-# - seqtab16S_paired.nochim.rds
-# - taxtable16S_paired.rds
-# - meta16sf.txt
-#
-# Output:
-# - physeq16S.rds
-# - rarefied16S.rds
-# - otu_abundance.txt
-# - taxonomy.txt
-# - soil_bacteria_dataset.xlsx
-# - sample_read_counts_sorted.txt
 
 library(phyloseq)
 library(openxlsx)
@@ -121,7 +108,6 @@ write.table(
   col.names = FALSE
 )
 
-cat("Sequencing depth summary before rarefaction:\n")
 print(summary(sample_sums(physeq16S)))
 
 # Rarefy phyloseq object
@@ -140,8 +126,6 @@ removed_samples <- setdiff(
   sample_names(physeq16S),
   sample_names(rarefied16S)
 )
-
-cat("Samples removed during rarefaction:", length(removed_samples), "\n")
 
 if (length(removed_samples) > 0) {
   print(removed_samples)
