@@ -60,7 +60,7 @@ tax_export <- as.data.frame(tax_table(physeq16S))
 
 write.table(
   otu_export,
-  file = "otu_abundance.txt",
+  file = "asv_abundance.txt",
   sep = "\t",
   quote = FALSE,
   row.names = TRUE,
