@@ -1,0 +1,128 @@
+# Figure 5 stats: Richness & Coverage vs Spatial Extent
+#
+# Models:
+#   Richness  — Gamma GLMM, log-link:   Value ~ log(Extent) * Type + (1|Plot)
+#   Coverage  — Beta  GLMM, logit-link: Value ~ log(Extent) * Type + (1|Plot)
+
+
+  library(dplyr)
+  library(tidyr)
+  library(glmmTMB)
+  library(performance)
+  library(car)
+  library(emmeans)
+  library(DHARMa)
+  library(openxlsx)
+
+setwd("path/to/your/16S/data")
+
+# -- 1. Load data
+sampling_data <- openxlsx::read.xlsx("sampling100_Engel.xlsx")
+
+# -- 2. Settings
+type_levels <- c("Grassland", "Forest")
+z95         <- qnorm(0.975)
+
+# -- 3. Prepare long datasets
+
+## 3a. Plot-level Richness (Gamma_q0, GammaRare_q0)
+rich_long <- sampling_data %>%
+  mutate(
+    Type   = factor(trimws(Type), levels = type_levels),
+    Plot   = factor(Plot),
+    Extent = as.numeric(Extent),
+    logX   = log(Extent)
+  ) %>%
+  pivot_longer(
+    cols      = c(Gamma_q0, GammaRare_q0),
+    names_to  = "Metric",
+    values_to = "Value"
+  ) %>%
+  mutate(Metric = factor(Metric, levels = c("Gamma_q0", "GammaRare_q0"))) %>%
+  filter(is.finite(Value), Value > 0, is.finite(Extent), Extent > 0)
+
+## 3b. Sample Coverage (Gamma_SC_q0, GammaRare_SC_q0)
+cov_long <- sampling_data %>%
+  mutate(
+    Type   = factor(trimws(Type), levels = type_levels),
+    Plot   = factor(Plot),
+    Extent = as.numeric(Extent),
+    logX   = log(Extent)
+  ) %>%
+  pivot_longer(
+    cols      = c(Gamma_SC_q0, GammaRare_SC_q0),
+    names_to  = "Metric",
+    values_to = "Value"
+  ) %>%
+  mutate(
+    Metric = factor(Metric, levels = c("Gamma_SC_q0", "GammaRare_SC_q0")),
+    Value  = pmax(1e-6, pmin(Value, 1 - 1e-6))
+  ) %>%
+  filter(is.finite(Value), is.finite(Extent), Extent > 0)
+
+# -- 4. Fit models
+
+## Plot-level Richness
+m_rich_obs <- glmmTMB(Value ~ logX * Type + (1 | Plot),
+                       data   = filter(rich_long, Metric == "Gamma_q0"),
+                       family = Gamma(link = "log"))
+
+m_rich_std <- glmmTMB(Value ~ logX * Type + (1 | Plot),
+                       data   = filter(rich_long, Metric == "GammaRare_q0"),
+                       family = Gamma(link = "log"))
+
+## Sample Coverage
+m_cov_obs  <- glmmTMB(Value ~ logX * Type + (1 | Plot),
+                       data   = filter(cov_long, Metric == "Gamma_SC_q0"),
+                       family = beta_family(link = "logit"))
+
+m_cov_std  <- glmmTMB(Value ~ logX * Type + (1 | Plot),
+                       data   = filter(cov_long, Metric == "GammaRare_SC_q0"),
+                       family = beta_family(link = "logit"))
+
+# -- 5. Helper: run all stats for one model
+run_stats <- function(m, metric_name) {
+
+  print(performance::r2(m))
+  print(car::Anova(m, type = 3))
+
+  em  <- emmeans::emtrends(m, ~ Type, var = "logX")
+  s   <- as.data.frame(summary(em))
+
+  slopes <- data.frame(
+    Metric            = metric_name,
+    Type              = as.character(s$Type),
+    slope_logExtent   = signif(as.numeric(s$logX.trend), 5),
+    SE                = signif(as.numeric(s$SE), 5),
+    gain_per_doubling = signif(exp(log(2) * as.numeric(s$logX.trend)), 5),
+    LCL               = signif(exp(log(2) * (as.numeric(s$logX.trend) - z95 * as.numeric(s$SE))), 5),
+    UCL               = signif(exp(log(2) * (as.numeric(s$logX.trend) + z95 * as.numeric(s$SE))), 5)
+  )
+
+  print(slopes)
+  print(as.data.frame(contrast(em, method = "revpairwise")))
+
+  res <- DHARMa::simulateResiduals(m, n = 500, refit = FALSE)
+  print(DHARMa::testUniformity(res))
+  print(DHARMa::testDispersion(res))
+
+  png(paste0("DHARMa_", metric_name, "_Extent.png"), width = 1000, height = 800, res = 140)
+  plot(res)
+  dev.off()
+
+  slopes
+}
+
+# -- 6. Run stats
+slopes_all <- bind_rows(
+  run_stats(m_rich_obs, "Gamma_q0"),
+  run_stats(m_rich_std, "GammaRare_q0"),
+  run_stats(m_cov_obs,  "Gamma_SC_q0"),
+  run_stats(m_cov_std,  "GammaRare_SC_q0")
+)
+
+# -- 7. Save slopes summary
+wb <- createWorkbook()
+addWorksheet(wb, "Slopes_gain_per_doubling")
+writeData(wb, "Slopes_gain_per_doubling", slopes_all)
+saveWorkbook(wb, "Stats_Fig5_extent.xlsx", overwrite = TRUE)
