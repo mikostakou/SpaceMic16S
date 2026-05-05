@@ -1,0 +1,95 @@
+# Figure 2 stats: Taxon richness distributions at N = 14
+#
+# Test: Wilcoxon rank-sum (Forest vs Grassland) per metric
+# Correction: Holm across the 4 metrics in the final panel
+
+
+  library(dplyr)
+  library(tidyr)
+  library(openxlsx)
+
+setwd("path/to/your/16S/data")
+
+# -- 1. Load data
+sampling_data <- openxlsx::read.xlsx("16S_sampling_curves_individual.xlsx") %>%
+  mutate(
+    SampleSize = as.integer(SampleSize),
+    Type       = factor(trimws(Type), levels = c("Forest", "Grassland")),
+    Plot       = as.character(Plot)
+  ) %>%
+  filter(SampleSize == 14)
+
+composite_data <- openxlsx::read.xlsx("16S_plot_level_individual_vs_composite.xlsx") %>%
+  mutate(
+    Type = factor(trimws(Type), levels = c("Forest", "Grassland")),
+    Plot = as.character(Plot)
+  )
+
+# -- 2. Settings
+metric_levels <- c(
+  "Sample-level",
+  "Plot-level",
+  "Plot-level standardized",
+  "Composite samples"
+)
+
+# -- 3. Prepare long data (same 4 metrics as figure)
+nonpooled14 <- sampling_data %>%
+  pivot_longer(
+    cols      = c(Alpha_q0, Gamma_q0, GammaRare_q0),
+    names_to  = "Metric",
+    values_to = "Value"
+  ) %>%
+  mutate(Metric = dplyr::recode(Metric,
+    Alpha_q0     = "Sample-level",
+    Gamma_q0     = "Plot-level",
+    GammaRare_q0 = "Plot-level standardized"
+  ))
+
+composite14 <- composite_data %>%
+  transmute(
+    Plot, Type,
+    Metric = "Composite samples",
+    Value  = Gamma_q0_composite
+  )
+
+dat14 <- bind_rows(nonpooled14, composite14) %>%
+  filter(!is.na(Type), is.finite(Value), Value > 0) %>%
+  mutate(Metric = factor(Metric, levels = metric_levels))
+
+# -- 4. Helper: summary stats + Wilcoxon per metric
+wilcox_one <- function(dat, metric_label) {
+  sub <- filter(dat, Metric == metric_label)
+  sf  <- sub %>% filter(Type == "Forest")    %>% pull(Value)
+  sg  <- sub %>% filter(Type == "Grassland") %>% pull(Value)
+
+  wt <- wilcox.test(sf, sg, exact = FALSE)
+
+  data.frame(
+    Metric         = as.character(metric_label),
+    n_Forest       = length(sf),
+    mean_Forest    = signif(mean(sf), 5),
+    sd_Forest      = signif(sd(sf),   5),
+    n_Grassland    = length(sg),
+    mean_Grassland = signif(mean(sg), 5),
+    sd_Grassland   = signif(sd(sg),   5),
+    W              = unname(wt$statistic),
+    p              = wt$p.value
+  )
+}
+
+# -- 5. Holm correction
+results <- bind_rows(
+  lapply(metric_levels, wilcox_one, dat = dat14)
+) %>%
+  mutate(
+    p_adj = p.adjust(p, method = "holm"),
+    across(where(is.numeric), ~ signif(.x, 5))
+  )
+
+print(results)
+
+wb <- createWorkbook()
+addWorksheet(wb, "Wilcoxon_N14")
+writeData(wb, "Wilcoxon_N14", results)
+saveWorkbook(wb, "Stats_Fig2.xlsx", overwrite = TRUE)
