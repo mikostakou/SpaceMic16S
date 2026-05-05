@@ -17,7 +17,7 @@
 setwd("path/to/your/16S/data")
 
 # -- 1. Load data
-sampling_data <- openxlsx::read.xlsx("sampling100_Engel.xlsx")
+sampling_data <- openxlsx::read.xlsx("16S_sampling_curves_individual.xlsx")
 
 # -- 2. Settings
 type_levels <- c("Grassland", "Forest")
