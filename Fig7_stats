@@ -1,0 +1,120 @@
+# Figure 7 stats: Plot-level richness vs Sample-level richness across spatial extent ranges
+#
+# Model: Gamma GLMM, log-link: Gamma_q0 ~ log(Alpha_q0) * Type + (1|Plot) fit separately per extent range
+
+  library(dplyr)
+  library(tidyr)
+  library(glmmTMB)
+  library(performance)
+  library(car)
+  library(emmeans)
+  library(DHARMa)
+  library(purrr)
+  library(openxlsx)
+
+setwd("path/to/your/16S/data")
+
+# -- 1. Load data
+sampling_data <- openxlsx::read.xlsx("16S_sampling_curves_individual.xlsx")
+
+# -- 2. Settings
+type_levels <- c("Forest", "Grassland")
+extent_bins <- c("0–75 m", "100–300 m", "600–1000 m")
+z95         <- qnorm(0.975)
+
+# -- 3. Prepare data
+df_sub <- sampling_data %>%
+  mutate(
+    Type = factor(Type, levels = type_levels),
+    ExtentBin = case_when(
+      Extent >=   0 & Extent <=   75  ~ "0–75 m",
+      Extent >= 100 & Extent <=  300  ~ "100–300 m",
+      Extent >= 600 & Extent <= 1000  ~ "600–1000 m",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(ExtentBin)) %>%
+  mutate(
+    ExtentBin = factor(ExtentBin, levels = extent_bins),
+    logAlpha  = log(Alpha_q0)
+  ) %>%
+  drop_na(Alpha_q0, Gamma_q0, Type, Plot)
+
+# -- 4. Helper: run all stats for one extent range
+run_stats_one_bin <- function(dat, extent_label) {
+
+  m <- glmmTMB(
+    Gamma_q0 ~ logAlpha * Type + (1 | Plot),
+    data   = dat,
+    family = Gamma(link = "log")
+  )
+
+  print(performance::r2(m))
+  print(car::Anova(m, type = 3))
+
+  tr   <- emmeans::emtrends(m, ~ Type, var = "logAlpha")
+  tr_df <- as.data.frame(summary(tr))
+
+  slopes <- data.frame(
+    ExtentBin         = extent_label,
+    Type              = as.character(tr_df$Type),
+    slope_logAlpha    = signif(tr_df$logAlpha.trend, 5),
+    SE                = signif(tr_df$SE, 5),
+    gain_per_doubling = signif(exp(log(2) * tr_df$logAlpha.trend), 5),
+    LCL               = signif(exp(log(2) * (tr_df$logAlpha.trend - z95 * tr_df$SE)), 5),
+    UCL               = signif(exp(log(2) * (tr_df$logAlpha.trend + z95 * tr_df$SE)), 5)
+  )
+
+  print(slopes)
+  print(as.data.frame(contrast(tr, method = "pairwise")))
+
+  # Predicted Gamma at the median Alpha for each ecosystem Type
+  Aref <- dat %>%
+    group_by(Type) %>%
+    summarise(Alpha_ref = median(Alpha_q0, na.rm = TRUE), .groups = "drop") %>%
+    mutate(logAlpha = log(Alpha_ref), ExtentBin = extent_label)
+
+  pr <- predict(m, newdata = Aref, type = "link", se.fit = TRUE, re.form = NA)
+
+  panel <- Aref %>%
+    mutate(
+      Gamma_hat = exp(pr$fit),
+      Gamma_lo  = exp(pr$fit - 1.96 * pr$se.fit),
+      Gamma_hi  = exp(pr$fit + 1.96 * pr$se.fit),
+      beta_hat  = Gamma_hat / Alpha_ref,
+      beta_lo   = Gamma_lo  / Alpha_ref,
+      beta_hi   = Gamma_hi  / Alpha_ref
+    )
+
+  print(panel)
+
+  # DHARMa
+  set.seed(123)
+  res <- DHARMa::simulateResiduals(m, n = 500, refit = FALSE)
+  print(DHARMa::testUniformity(res))
+  print(DHARMa::testDispersion(res))
+
+  png(paste0("DHARMa_Fig7_", gsub("[^0-9A-Za-z]", "_", extent_label), ".png"),
+      width = 1000, height = 800, res = 140)
+  plot(res)
+  dev.off()
+
+  list(slopes = slopes, panel = panel)
+}
+
+# -- 5. Run stats for all extent ranges
+results <- lapply(extent_bins, function(b) {
+  run_stats_one_bin(filter(df_sub, ExtentBin == b), b)
+})
+names(results) <- extent_bins
+
+# -- 6. Save summary tables
+slopes_all <- bind_rows(lapply(results, `[[`, "slopes"))
+panel_all  <- bind_rows(lapply(results, `[[`, "panel"))
+
+wb <- createWorkbook()
+addWorksheet(wb, "Slopes_gain_per_doubling")
+writeData(wb, "Slopes_gain_per_doubling", slopes_all)
+addWorksheet(wb, "Panel_predictions")
+writeData(wb, "Panel_predictions", panel_all)
+saveWorkbook(wb, "Stats_Fig7.xlsx", overwrite = TRUE)
