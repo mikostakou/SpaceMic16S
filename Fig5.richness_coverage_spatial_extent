@@ -1,0 +1,286 @@
+# Figure 5: Richness & Coverage vs Spatial Extent (panels a-d)
+#
+# a: Plot-level richness
+# b: Plot-level richness standardized
+# c: Sample coverage
+# d: Sample coverage standardized
+#
+# Models:
+#   a & b — Gamma GLMM, log-link:   Value ~ log(Extent) * Type + (1|Plot)
+#   c & d — Beta  GLMM, logit-link: Value ~ log(Extent) * Type + (1|Plot)
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(glmmTMB)
+library(cowplot)
+library(openxlsx)
+library(grid)
+
+setwd("path/to/your/16S/data")
+
+# -- 1. Load data
+sampling_data <- openxlsx::read.xlsx("sampling100_Engel.xlsx")
+
+# -- 2. Plot settings
+color_scheme <- c("Forest" = "green4", "Grassland" = "yellowgreen")
+type_levels  <- c("Grassland", "Forest")
+line_cols    <- c("Forest" = "darkgreen", "Grassland" = "olivedrab")
+
+# -- 3. Prepare long datasets
+
+## 3a. Plot-level Richness (Gamma_q0, GammaRare_q0)
+rich_long <- sampling_data %>%
+  mutate(
+    Type   = factor(trimws(Type), levels = type_levels),
+    Plot   = factor(Plot),
+    Extent = as.numeric(Extent)
+  ) %>%
+  pivot_longer(
+    cols      = c(Gamma_q0, GammaRare_q0),
+    names_to  = "Metric",
+    values_to = "Value"
+  ) %>%
+  mutate(Metric = factor(Metric, levels = c("Gamma_q0", "GammaRare_q0"))) %>%
+  filter(is.finite(Value), Value > 0, is.finite(Extent), Extent > 0)
+
+## 3b. Sample Coverage (Gamma_SC_q0, GammaRare_SC_q0)
+cov_long <- sampling_data %>%
+  mutate(
+    Type   = factor(trimws(Type), levels = type_levels),
+    Plot   = factor(Plot),
+    Extent = as.numeric(Extent)
+  ) %>%
+  pivot_longer(
+    cols      = c(Gamma_SC_q0, GammaRare_SC_q0),
+    names_to  = "Metric",
+    values_to = "Value"
+  ) %>%
+  mutate(
+    Metric = factor(Metric, levels = c("Gamma_SC_q0", "GammaRare_SC_q0")),
+    Value  = pmax(1e-6, pmin(Value, 1 - 1e-6))   # (0,1) for beta family
+  ) %>%
+  filter(is.finite(Value), is.finite(Extent), Extent > 0)
+
+# -- 4. Fit models
+
+## 4a. Plot-level Richness — Gamma GLMM, log-link
+m_rich_obs <- glmmTMB(Value ~ log(Extent) * Type + (1 | Plot),
+                       data   = filter(rich_long, Metric == "Gamma_q0"),
+                       family = Gamma(link = "log"))
+
+m_rich_std <- glmmTMB(Value ~ log(Extent) * Type + (1 | Plot),
+                       data   = filter(rich_long, Metric == "GammaRare_q0"),
+                       family = Gamma(link = "log"))
+
+## 4b. Sample Coverage — Beta GLMM, logit-link
+m_cov_obs  <- glmmTMB(Value ~ log(Extent) * Type + (1 | Plot),
+                       data   = filter(cov_long, Metric == "Gamma_SC_q0"),
+                       family = beta_family(link = "logit"))
+
+m_cov_std  <- glmmTMB(Value ~ log(Extent) * Type + (1 | Plot),
+                       data   = filter(cov_long, Metric == "GammaRare_SC_q0"),
+                       family = beta_family(link = "logit"))
+
+# -- 5. Prediction grids (fixed effects only, clipped per Type)
+base_plot <- levels(rich_long$Plot)[1]
+
+## Helper: prediction grid clipped to observed Extent range per Type
+clip_grid_by_type <- function(dat, n = 250) {
+  rng <- dat %>%
+    group_by(Type) %>%
+    summarise(
+      xmin = min(Extent[Extent > 0], na.rm = TRUE),
+      xmax = max(Extent, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(xmin = pmax(xmin, .Machine$double.eps))
+
+  bind_rows(lapply(seq_len(nrow(rng)), function(i) {
+    data.frame(
+      Type   = rng$Type[i],
+      Extent = seq(rng$xmin[i], rng$xmax[i], length.out = n),
+      Plot   = base_plot,
+      stringsAsFactors = FALSE
+    )
+  })) %>%
+    mutate(
+      Type = factor(Type, levels = levels(dat$Type)),
+      Plot = factor(Plot, levels = levels(dat$Plot))
+    )
+}
+
+## Helper: safe predict on link scale (falls back to manual matrix multiply)
+safe_predict_link <- function(mod, newdata) {
+  out <- try(
+    predict(mod, newdata = newdata, type = "link", se.fit = TRUE, re.form = NA),
+    silent = TRUE
+  )
+  if (!inherits(out, "try-error")) return(list(eta = out$fit, se = out$se.fit))
+
+  X   <- model.matrix(delete.response(terms(mod)), newdata)
+  V   <- vcov(mod)$cond
+  bet <- fixef(mod)$cond
+  list(
+    eta = as.numeric(X %*% bet),
+    se  = sqrt(rowSums((X %*% V) * X))
+  )
+}
+
+## Helper: full predict pipeline for one metric
+make_preds <- function(model, dat, metric_name, metric_levels, inv_fun) {
+  grid <- clip_grid_by_type(dat)
+  pr   <- safe_predict_link(model, grid)
+
+  cbind(grid, eta = pr$eta, se = pr$se) %>%
+    transmute(
+      Type, Extent,
+      Mean  = inv_fun(eta),
+      Lower = inv_fun(eta - 1.96 * se),
+      Upper = inv_fun(eta + 1.96 * se),
+      Metric = factor(metric_name, levels = metric_levels)
+    ) %>%
+    arrange(Type, Extent)
+}
+
+preds_rich <- bind_rows(
+  make_preds(m_rich_obs, filter(rich_long, Metric == "Gamma_q0"),
+             "Gamma_q0",     levels(rich_long$Metric), exp),
+  make_preds(m_rich_std, filter(rich_long, Metric == "GammaRare_q0"),
+             "GammaRare_q0", levels(rich_long$Metric), exp)
+)
+
+preds_cov <- bind_rows(
+  make_preds(m_cov_obs, filter(cov_long, Metric == "Gamma_SC_q0"),
+             "Gamma_SC_q0",     levels(cov_long$Metric), plogis),
+  make_preds(m_cov_std, filter(cov_long, Metric == "GammaRare_SC_q0"),
+             "GammaRare_SC_q0", levels(cov_long$Metric), plogis)
+)
+
+# -- 6. Build individual panels
+panel_aspect    <- 1
+reserved_left   <- 30
+panel_margin    <- margin(t = 10, r = 10, b = 10, l = reserved_left)
+legend_override <- list(alpha = 1, shape = 16, size = 4, linewidth = 1.2)
+
+base_theme <- theme_bw(base_size = 16) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    legend.position    = "none",
+    aspect.ratio       = panel_aspect,
+    plot.margin        = panel_margin,
+    axis.title.y       = element_blank(),
+    axis.text.y        = element_text(margin = margin(r = 6)),
+    axis.title.x       = element_text(margin = margin(t = 10)),
+    axis.text.x        = element_text(margin = margin(t = 2))
+  )
+
+## Helper: build one panel 
+make_panel <- function(points_dat, preds_dat, y_limits) {
+  ggplot() +
+    geom_point(
+      data = points_dat,
+      aes(Extent, Value, color = Type),
+      alpha = 0.01, size = 1,
+      position = position_jitter(width = 0.1, height = 0)
+    ) +
+    geom_ribbon(
+      data = preds_dat,
+      aes(Extent, ymin = Lower, ymax = Upper, fill = Type),
+      alpha = 0.50, color = NA
+    ) +
+    geom_line(
+      data  = filter(preds_dat, Type == "Forest"),
+      aes(Extent, Mean),
+      color = line_cols[["Forest"]], linewidth = 1
+    ) +
+    geom_line(
+      data  = filter(preds_dat, Type == "Grassland"),
+      aes(Extent, Mean),
+      color = line_cols[["Grassland"]], linewidth = 1
+    ) +
+    scale_color_manual(values = color_scheme, name = "") +
+    scale_fill_manual(values  = color_scheme, guide = "none") +
+    coord_cartesian(ylim = y_limits) +
+    labs(x = "Spatial extent (m)", y = NULL) +
+    base_theme
+}
+
+ylims_rich <- range(c(rich_long$Value, preds_rich$Lower, preds_rich$Upper), na.rm = TRUE)
+ylims_cov  <- c(0.5, 1.02)
+
+set.seed(1)
+pA <- make_panel(filter(rich_long,  Metric == "Gamma_q0"),
+                 filter(preds_rich, Metric == "Gamma_q0"), ylims_rich)
+pB <- make_panel(filter(rich_long,  Metric == "GammaRare_q0"),
+                 filter(preds_rich, Metric == "GammaRare_q0"), ylims_rich)
+pC <- make_panel(filter(cov_long,   Metric == "Gamma_SC_q0"),
+                 filter(preds_cov,  Metric == "Gamma_SC_q0"), ylims_cov)
+pD <- make_panel(filter(cov_long,   Metric == "GammaRare_SC_q0"),
+                 filter(preds_cov,  Metric == "GammaRare_SC_q0"), ylims_cov)
+
+# -- 7. Assemble figure
+
+## Force identical panel areas
+aligned <- cowplot::align_plots(pA, pB, pC, pD, align = "hv", axis = "tblr")
+
+## Add y-axis titles manually (pixel-aligned across all panels)
+add_ytitle <- function(p, ylab) {
+  ggdraw(p) +
+    draw_label(ylab, x = 0.05, y = 0.5, angle = 90,
+               hjust = 0.5, vjust = 0.5, size = 16) +
+    theme(plot.background = element_rect(fill = "white", color = NA),
+          plot.margin = margin(0, 0, 0, 0))
+}
+
+pA_w <- add_ytitle(aligned[[1]], "Plot-level richness")
+pB_w <- add_ytitle(aligned[[2]], "Plot-level richness standardized")
+pC_w <- add_ytitle(aligned[[3]], "Sample coverage")
+pD_w <- add_ytitle(aligned[[4]], "Sample coverage standardized")
+
+## Assembly with panel labels
+top_row <- plot_grid(pA_w, pB_w, nrow = 1) %>%
+  ggdraw() +
+  draw_plot_label(c("a","b"), x = c(0.01,0.51), y = c(0.99,0.99),
+                  hjust = 0, vjust = 1, size = 18) +
+  theme(plot.background = element_rect(fill = "white", color = NA))
+
+bot_row <- plot_grid(pC_w, pD_w, nrow = 1) %>%
+  ggdraw() +
+  draw_plot_label(c("c","d"), x = c(0.01,0.51), y = c(0.99,0.99),
+                  hjust = 0, vjust = 1, size = 18) +
+  theme(plot.background = element_rect(fill = "white", color = NA))
+
+## Shared legend
+legend_src <- ggplot(filter(preds_cov, Metric == "Gamma_SC_q0")) +
+  geom_line(aes(Extent, Mean, color = Type), linewidth = 1) +
+  scale_color_manual(values = color_scheme, name = "") +
+  theme_void() +
+  theme(legend.position = "bottom",
+        legend.text = element_text(size = 12),
+        legend.key.size = unit(1.1, "cm"),
+        legend.spacing.x = unit(0.6, "cm")) +
+  guides(color = guide_legend(
+    override.aes = list(shape = 16, size = 3, linewidth = 1, alpha = 1),
+    nrow = 1
+  ))
+
+extract_legend <- function(p) {
+  g   <- ggplotGrob(p)
+  idx <- which(sapply(g$grobs, function(x) x$name) == "guide-box")
+  g$grobs[[idx[1]]]
+}
+
+legend_row <- ggdraw(extract_legend(legend_src)) +
+  theme(plot.background = element_rect(fill = "white", color = NA),
+        plot.margin = margin(0, 0, 0, 0))
+
+## Final figure
+fig5 <- plot_grid(
+  top_row, bot_row, legend_row,
+  ncol = 1,
+  rel_heights = c(1, 1, 0.18)
+)
+
+ggsave("Fig5_richness_coverage_extent.png", fig5,
+       width = 10, height = 10, dpi = 600, bg = "white")
