@@ -20,7 +20,7 @@ library(grid)
 setwd("path/to/your/16S/data")
 
 # -- 1. Load data
-sampling_data <- openxlsx::read.xlsx("sampling100_Engel.xlsx")
+sampling_data <- openxlsx::read.xlsx("16S_sampling_curves_individual.xlsx")
 
 # -- 2. Plot settings
 color_scheme <- c("Forest" = "green4", "Grassland" = "yellowgreen")
