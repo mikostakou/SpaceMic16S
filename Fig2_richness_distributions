@@ -1,0 +1,97 @@
+# Figure 2: Taxon richness distributions across ecosystem types at N = 14 cores (individual + composite)
+#
+# Panels: Sample-level | Plot-level | Plot-level standardized | Composite Samples
+
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggtext)
+library(openxlsx)
+
+setwd("path/to/your/16S/data")
+
+# -- 1. Load data
+sampling_data <- openxlsx::read.xlsx("16S_sampling_curves_individual.xlsx") %>%
+  mutate(
+    SampleSize = as.integer(SampleSize),
+    Type       = factor(trimws(Type), levels = c("Forest", "Grassland")),
+    Plot       = as.character(Plot)
+  ) %>%
+  filter(SampleSize == 14)
+
+composite_data <- openxlsx::read.xlsx("16S_plot_level_individual_vs_composite.xlsx") %>%
+  mutate(
+    Type = factor(trimws(Type), levels = c("Forest", "Grassland")),
+    Plot = as.character(Plot)
+  )
+
+# -- 2. Plot settings
+pal_type <- c("Forest" = "#228B22", "Grassland" = "#9ACD32")
+
+metric_labels <- c(
+  Alpha_q0     = "Individual cores<br><span style='font-size:10pt'>(sample-level, mean, n=14)</span>",
+  Gamma_q0     = "Plot-level<br><span style='font-size:10pt'>(sum, n=14)</span>",
+  GammaRare_q0 = "Plot-level standardized<br><span style='font-size:10pt'>(sum, n=14)</span>",
+  Composite    = "Composite samples<br><span style='font-size:10pt'>(plot-level, true composite)</span>"
+)
+
+# -- 3. Prepare data
+
+## Individual cores (3 metrics at N=14)
+nonpooled14 <- sampling_data %>%
+  pivot_longer(
+    cols      = c(Alpha_q0, Gamma_q0, GammaRare_q0),
+    names_to  = "Metric",
+    values_to = "Value"
+  ) %>%
+  mutate(Metric = dplyr::recode(Metric,
+    Alpha_q0     = metric_labels[["Alpha_q0"]],
+    Gamma_q0     = metric_labels[["Gamma_q0"]],
+    GammaRare_q0 = metric_labels[["GammaRare_q0"]]
+  )) %>%
+  filter(!is.na(Type), is.finite(Value))
+
+## Composite cores (plot-level richness from one composite sample per plot)
+composite14 <- composite_data %>%
+  transmute(
+    Plot, Type,
+    Metric = metric_labels[["Composite"]],
+    Value  = Gamma_q0_composite
+  ) %>%
+  filter(!is.na(Type), is.finite(Value))
+
+## Combined
+dat14 <- bind_rows(nonpooled14, composite14) %>%
+  mutate(Metric = factor(Metric, levels = unname(metric_labels)))
+
+y_max <- max(dat14$Value, na.rm = TRUE)
+
+# -- 4. Build figure
+p <- ggplot(dat14, aes(x = Type, y = Value)) +
+  geom_jitter(color = "grey75", alpha = 0.15, size = 1.8,
+              width = 0.15, height = 0) +
+  geom_violin(aes(fill = Type, color = Type),
+              width = 0.85, alpha = 0.45, trim = TRUE) +
+  stat_summary(aes(color = Type),
+               fun.data = mean_sdl, fun.args = list(mult = 1),
+               geom = "pointrange", linewidth = 0.9) +
+  stat_summary(aes(fill = Type),
+               fun = mean, geom = "point",
+               shape = 21, size = 3, color = "black", stroke = 0.5) +
+  scale_fill_manual(values  = pal_type, guide = "none") +
+  scale_color_manual(values = pal_type, guide = "none") +
+  facet_wrap(~ Metric, ncol = 4, scales = "fixed") +
+  coord_cartesian(ylim = c(0, y_max)) +
+  labs(x = "", y = "Taxon Richness") +
+  theme_bw(base_size = 16) +
+  theme(
+    strip.background = element_rect(fill = "gray92", color = NA),
+    strip.text       = ggtext::element_markdown(face = "bold", size = 12, lineheight = 1.05),
+    axis.title       = element_text(size = 16),
+    axis.text        = element_text(size = 12)
+  )
+
+print(p)
+ggsave("Fig2_richness_distributions_N14.png", p,
+       width = 12, height = 6, dpi = 600, bg = "white")
