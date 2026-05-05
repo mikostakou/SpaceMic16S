@@ -1,0 +1,136 @@
+# Figure 7: Plot-level richness vs Sample-level richness
+#           across spatial extent range (panels by Type x Extent)
+#
+# Model: Gamma GLMM, log-link: Gamma_q0 ~ log(Alpha_q0) * Type + (1|Plot)
+#        fit separately per extent range
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(glmmTMB)
+library(ggnewscale)
+library(purrr)
+library(tibble)
+library(openxlsx)
+
+setwd("path/to/your/16S/data")
+
+# -- 1. Load data
+sampling_data <- openxlsx::read.xlsx("16S_sampling_curves_individual.xlsx")
+
+# -- 2. Plot settings
+color_scheme_points <- c("Forest" = "forestgreen", "Grassland" = "yellowgreen")
+color_scheme_lines  <- c("Forest" = "darkgreen",   "Grassland" = "olivedrab")
+type_levels         <- c("Forest", "Grassland")
+extent_bins         <- c("0–75 m", "100–300 m", "600–1000 m")
+
+# -- 3. Prepare data
+df_sub <- sampling_data %>%
+  mutate(
+    Type = factor(Type, levels = type_levels),
+    ExtentBin = case_when(
+      Extent >=   0 & Extent <=   75  ~ "0–75 m",
+      Extent >= 100 & Extent <=  300  ~ "100–300 m",
+      Extent >= 600 & Extent <= 1000  ~ "600–1000 m",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(ExtentBin)) %>%
+  mutate(ExtentBin = factor(ExtentBin, levels = extent_bins)) %>%
+  drop_na(Alpha_q0, Gamma_q0, Type, Plot)
+
+# -- 4. Fit models and build prediction grids per extent range
+
+## Helper: prediction grid clipped to observed Alpha range per Type
+get_preds_one_bin <- function(dat, extent_label) {
+  dat <- dat %>% mutate(logAlpha = log(Alpha_q0))
+
+  m <- glmmTMB(
+    Gamma_q0 ~ logAlpha * Type + (1 | Plot),
+    data   = dat,
+    family = Gamma(link = "log")
+  )
+
+  ranges <- dat %>%
+    group_by(Type) %>%
+    summarise(
+      a_min = max(quantile(Alpha_q0, 0.01, na.rm = TRUE), min(Alpha_q0, na.rm = TRUE)),
+      a_max = min(quantile(Alpha_q0, 0.99, na.rm = TRUE), max(Alpha_q0, na.rm = TRUE)),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      a_min = ifelse(a_min == a_max, pmax(1e-6, a_min * 0.99), a_min),
+      a_max = ifelse(a_min == a_max, a_max * 1.01, a_max)
+    )
+
+  grid <- pmap_dfr(
+    list(ranges$Type, ranges$a_min, ranges$a_max),
+    function(tp, lo, hi) {
+      tibble(
+        Type     = factor(tp, levels = type_levels),
+        Alpha_q0 = seq(lo, hi, length.out = 200)
+      )
+    }
+  ) %>%
+    mutate(
+      logAlpha  = log(Alpha_q0),
+      ExtentBin = factor(extent_label, levels = extent_bins)
+    )
+
+  pr <- predict(m, newdata = grid, type = "link", se.fit = TRUE, re.form = NA)
+  grid$fit <- exp(pr$fit)
+  grid$lo  <- exp(pr$fit - 1.96 * pr$se.fit)
+  grid$hi  <- exp(pr$fit + 1.96 * pr$se.fit)
+
+  grid
+}
+
+set.seed(1)
+pred_gamma <- bind_rows(
+  lapply(extent_bins, function(b) get_preds_one_bin(filter(df_sub, ExtentBin == b), b))
+) %>%
+  mutate(
+    Type      = factor(Type,      levels = type_levels),
+    ExtentBin = factor(ExtentBin, levels = extent_bins)
+  )
+
+# -- 5. Build figure
+p <- ggplot() +
+  geom_point(
+    data = df_sub,
+    aes(x = Alpha_q0, y = Gamma_q0, colour = Type),
+    alpha = 0.05, size = 1
+  ) +
+  scale_colour_manual(values = color_scheme_points) +
+  ggnewscale::new_scale_colour() +
+  geom_ribbon(
+    data = pred_gamma,
+    aes(x = Alpha_q0, ymin = lo, ymax = hi, fill = Type),
+    alpha = 0.18, colour = NA
+  ) +
+  scale_fill_manual(values = color_scheme_lines, guide = "none") +
+  geom_line(
+    data = pred_gamma,
+    aes(x = Alpha_q0, y = fit, colour = Type),
+    linewidth = 1.2
+  ) +
+  scale_colour_manual(values = color_scheme_lines, guide = "none") +
+  facet_grid(Type ~ ExtentBin) +
+  labs(x = "Sample-level richness", y = "Plot-level richness") +
+  theme_bw() +
+  theme(
+    legend.position    = "none",
+    axis.title.x       = element_text(size = 19),
+    axis.title.y       = element_text(size = 19),
+    axis.text          = element_text(size = 17),
+    strip.text         = element_text(size = 17, face = "bold"),
+    strip.text.y       = element_text(angle = -90),
+    strip.background.x = element_rect(fill = "grey92", color = "grey92"),
+    strip.background.y = element_rect(fill = "grey92", color = "grey92"),
+    panel.grid.major.x = element_line(color = "grey90", linewidth = 0.3),
+    panel.grid.minor   = element_blank()
+  )
+
+print(p)
+ggsave("Fig7_richness_scaling_extent.png", p,
+       width = 11, height = 6.8, dpi = 600, bg = "white")
