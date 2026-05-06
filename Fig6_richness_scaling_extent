@@ -1,4 +1,4 @@
-# Figure 7: Plot-level richness vs Sample-level richness
+# Figure 6: Plot-level richness vs Sample-level richness
 #           across spatial extent range (panels by Type x Extent)
 #
 # Model: Gamma GLMM, log-link: Gamma_q0 ~ log(Alpha_q0) * Type + (1|Plot)
@@ -132,5 +132,5 @@ p <- ggplot() +
   )
 
 print(p)
-ggsave("Fig7_richness_scaling_extent.png", p,
+ggsave("Fig6_richness_scaling_extent.png", p,
        width = 11, height = 6.8, dpi = 600, bg = "white")
