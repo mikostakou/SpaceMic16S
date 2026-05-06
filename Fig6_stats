@@ -1,4 +1,4 @@
-# Figure 7 stats: Plot-level richness vs Sample-level richness across spatial extent ranges
+# Figure 6 stats: Plot-level richness vs Sample-level richness across spatial extent ranges
 #
 # Model: Gamma GLMM, log-link: Gamma_q0 ~ log(Alpha_q0) * Type + (1|Plot) fit separately per extent range
 
@@ -94,7 +94,7 @@ run_stats_one_bin <- function(dat, extent_label) {
   print(DHARMa::testUniformity(res))
   print(DHARMa::testDispersion(res))
 
-  png(paste0("DHARMa_Fig7_", gsub("[^0-9A-Za-z]", "_", extent_label), ".png"),
+  png(paste0("DHARMa_Fig6_", gsub("[^0-9A-Za-z]", "_", extent_label), ".png"),
       width = 1000, height = 800, res = 140)
   plot(res)
   dev.off()
@@ -117,4 +117,4 @@ addWorksheet(wb, "Slopes_gain_per_doubling")
 writeData(wb, "Slopes_gain_per_doubling", slopes_all)
 addWorksheet(wb, "Panel_predictions")
 writeData(wb, "Panel_predictions", panel_all)
-saveWorkbook(wb, "Stats_Fig7.xlsx", overwrite = TRUE)
+saveWorkbook(wb, "Stats_Fig6.xlsx", overwrite = TRUE)
