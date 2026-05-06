@@ -1,0 +1,79 @@
+# Figure 4 stats: Plot-level richness standardization ratio
+#
+# Tests:
+#   1) Forest vs Grassland per sampling effort (Wilcoxon, Holm corrected)
+#   2) Trend with sampling effort per ecosystem (Spearman)
+
+
+library(dplyr)
+library(openxlsx)
+
+setwd("path/to/your/16S/data")
+
+# -- 1. Load and prepare data
+sampling_data <- openxlsx::read.xlsx("16S_sampling_curves_individual.xlsx") %>%
+  mutate(SampleSize = as.integer(SampleSize)) %>%
+  filter(SampleSize %in% c(3, 6, 12)) %>%
+  mutate(
+    SampleSizeF = factor(SampleSize, levels = c(3, 6, 12), labels = c("3", "6", "12")),
+    Type        = factor(Type, levels = c("Forest", "Grassland"))
+  ) %>%
+  filter(!is.na(Gamma_q0), !is.na(GammaRare_q0), Gamma_q0 > 0) %>%
+  mutate(Ratio_q0 = GammaRare_q0 / Gamma_q0) %>%
+  filter(is.finite(Ratio_q0))
+
+# -- 2. Plot-level means (one value per Plot x Type x SampleSize)
+plot_means <- sampling_data %>%
+  group_by(Type, SampleSizeF, Plot) %>%
+  summarise(Ratio_mean = mean(Ratio_q0, na.rm = TRUE), .groups = "drop")
+
+# -- 3. Summary stats (mean + 95% CI)
+sum_df <- plot_means %>%
+  group_by(Type, SampleSizeF) %>%
+  summarise(
+    n_plots = n(),
+    mean    = signif(mean(Ratio_mean), 5),
+    sd      = signif(sd(Ratio_mean),   5),
+    se      = signif(sd / sqrt(n_plots), 5),
+    ci_lo   = signif(mean - qt(0.975, df = pmax(n_plots - 1, 1)) * (sd / sqrt(n_plots)), 5),
+    ci_hi   = signif(mean + qt(0.975, df = pmax(n_plots - 1, 1)) * (sd / sqrt(n_plots)), 5),
+    .groups = "drop"
+  )
+
+print(sum_df)
+
+# -- 4. Forest vs Grassland per sampling effort (Wilcoxon + Holm)
+wilcox_by_N <- plot_means %>%
+  group_by(SampleSizeF) %>%
+  group_modify(~ {
+    wt <- wilcox.test(Ratio_mean ~ Type, data = .x, exact = FALSE)
+    data.frame(W = unname(wt$statistic), p = wt$p.value)
+  }) %>%
+  ungroup() %>%
+  mutate(
+    p_adj = p.adjust(p, method = "holm"),
+    across(where(is.numeric), ~ signif(.x, 5))
+  )
+
+print(wilcox_by_N)
+
+# -- 5. Trend with sampling effort per ecosystem (Spearman)
+spearman_by_type <- plot_means %>%
+  mutate(SampleSize_num = as.integer(as.character(SampleSizeF))) %>%
+  group_by(Type) %>%
+  group_modify(~ {
+    ct <- cor.test(.x$SampleSize_num, .x$Ratio_mean,
+                   method = "spearman", exact = FALSE)
+    data.frame(rho = signif(unname(ct$estimate), 5),
+               p   = signif(ct$p.value, 5),
+               n   = nrow(.x))
+  }) %>%
+  ungroup()
+
+print(spearman_by_type)
+
+wb <- createWorkbook()
+addWorksheet(wb, "Summary_mean_CI");  writeData(wb, "Summary_mean_CI",  sum_df)
+addWorksheet(wb, "Wilcoxon_by_N");    writeData(wb, "Wilcoxon_by_N",    wilcox_by_N)
+addWorksheet(wb, "Spearman_by_type"); writeData(wb, "Spearman_by_type", spearman_by_type)
+saveWorkbook(wb, "Stats_Fig4.xlsx", overwrite = TRUE)
