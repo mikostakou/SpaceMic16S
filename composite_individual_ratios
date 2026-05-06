@@ -1,0 +1,58 @@
+# Figure 3: Composite vs individual plot-level richness ratio
+#
+# Ratio: Gamma_q0_composite / Gamma_q0_ind
+# One violin plot per ecosystem type
+
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(openxlsx)
+
+setwd("path/to/your/16S/data")
+
+# -- 1. Load data
+composite_data <- openxlsx::read.xlsx("16S_plot_level_individual_vs_composite.xlsx") %>%
+  mutate(
+    Type = factor(trimws(Type), levels = c("Forest", "Grassland")),
+    Plot = as.character(Plot)
+  )
+
+# -- 2. Plot settings
+pal_type <- c("Forest" = "#228B22", "Grassland" = "#9ACD32")
+
+# -- 3. Prepare data
+ratios <- composite_data %>%
+  transmute(
+    Plot, Type,
+    Ratio_q0 = ifelse(Gamma_q0_ind > 0,
+                      Gamma_q0_composite / Gamma_q0_ind,
+                      NA_real_)
+  ) %>%
+  filter(!is.na(Type), is.finite(Ratio_q0))
+
+# -- 4. Build figure
+p <- ggplot(ratios, aes(x = Type, y = Ratio_q0)) +
+  geom_violin(
+    aes(fill = Type, color = Type),
+    alpha = 0.25, width = 0.9, trim = TRUE
+  ) +
+  geom_jitter(
+    aes(fill = Type),
+    shape = 21, color = "black", stroke = 0.5,
+    width = 0.12, height = 0,
+    size = 1.5, alpha = 0.85
+  ) +
+  scale_fill_manual(values  = pal_type, guide = "none") +
+  scale_color_manual(values = pal_type, guide = "none") +
+  coord_cartesian(ylim = c(0, 1.02)) +
+  labs(x = "", y = expression(gamma[comp] / gamma[ind] ~ richness)) +
+  theme_bw(base_size = 12) +
+  theme(
+    strip.background = element_rect(fill = "white", color = "black"),
+    strip.text       = element_text(face = "bold")
+  )
+
+print(p)
+ggsave("Fig3_composite_vs_individual_ratio.png", p,
+       width = 5, height = 4, dpi = 600)
