@@ -1,0 +1,79 @@
+# Figure 4: Plot-level richness standardization ratio (GammaRare_q0 / Gamma_q0) across sampling effort
+#
+# Ratio: plot-level standardized / plot-level observed richness
+
+
+library(dplyr)
+library(ggplot2)
+library(openxlsx)
+
+setwd("path/to/your/16S/data")
+
+# -- 1. Load and prepare data
+sampling_data <- openxlsx::read.xlsx("16S_sampling_curves_individual.xlsx") %>%
+  mutate(SampleSize = as.integer(SampleSize)) %>%
+  filter(SampleSize %in% c(3, 6, 12)) %>%
+  mutate(
+    SampleSizeF = factor(SampleSize, levels = c(3, 6, 12), labels = c("3", "6", "12")),
+    Type        = factor(Type, levels = c("Forest", "Grassland"))
+  ) %>%
+  filter(!is.na(Gamma_q0), !is.na(GammaRare_q0), Gamma_q0 > 0) %>%
+  mutate(Ratio_q0 = GammaRare_q0 / Gamma_q0) %>%
+  filter(is.finite(Ratio_q0))
+
+# -- 2. Plot settings
+type_cols <- c("Forest" = "forestgreen", "Grassland" = "yellowgreen")
+
+# -- 3. Summary stats (mean + 95% CI per Type x SampleSize)
+plot_means <- sampling_data %>%
+  group_by(Type, SampleSizeF, Plot) %>%
+  summarise(Ratio_mean = mean(Ratio_q0, na.rm = TRUE), .groups = "drop")
+
+sum_df <- plot_means %>%
+  group_by(Type, SampleSizeF) %>%
+  summarise(
+    n_plots = n(),
+    mean    = mean(Ratio_mean),
+    sd      = sd(Ratio_mean),
+    se      = sd / sqrt(n_plots),
+    tcrit   = qt(0.975, df = pmax(n_plots - 1, 1)),
+    ci_lo   = mean - tcrit * se,
+    ci_hi   = mean + tcrit * se,
+    .groups = "drop"
+  )
+
+# -- 4. Build figure
+set.seed(1)
+p <- ggplot(sampling_data, aes(SampleSizeF, Ratio_q0)) +
+  geom_point(
+    color = "grey80", alpha = 0.1, size = 1,
+    position = position_jitter(width = 0.18, height = 0),
+    na.rm = TRUE
+  ) +
+  geom_errorbar(
+    data = sum_df, inherit.aes = FALSE,
+    aes(SampleSizeF, ymin = ci_lo, ymax = ci_hi, color = Type),
+    width = 0.21, linewidth = 1, na.rm = TRUE
+  ) +
+  geom_point(
+    data = sum_df, inherit.aes = FALSE,
+    aes(SampleSizeF, mean, color = Type),
+    size = 3, na.rm = TRUE
+  ) +
+  facet_wrap(~ Type, nrow = 1) +
+  scale_color_manual(values = type_cols, name = NULL) +
+  labs(
+    x = "Sampling Effort",
+    y = "Plot-level richness (standardized / observed)"
+  ) +
+  theme_bw(base_size = 17) +
+  theme(
+    strip.text         = element_blank(),
+    strip.background   = element_blank(),
+    legend.position    = "bottom",
+    axis.title.y       = element_text(size = 17)
+  )
+
+print(p)
+ggsave("Fig4_richness_standardization_ratio.png", p,
+       width = 10, height = 6, dpi = 600)
