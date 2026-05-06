@@ -1,0 +1,116 @@
+# Figure 3 stats: Composite vs individual plot-level richness ratio
+#
+# Ratio: Gamma_q0_composite / Gamma_q0_ind
+# Tests:
+#   1) Ratio < 1 overall (one-sample Wilcoxon)
+#   2) Ratio < 1 per ecosystem (one-sample Wilcoxon)
+#   3) Ratio differs between ecosystems (two-sample Wilcoxon)
+#   4) Rank preservation (Spearman correlation)
+#   5) Variance compression (between-plot variance)
+
+
+  library(dplyr)
+  library(tidyr)
+  library(openxlsx)
+
+setwd("path/to/your/16S/data")
+
+# -- 1. Load data
+composite_data <- openxlsx::read.xlsx("16S_plot_level_individual_vs_composite.xlsx") %>%
+  mutate(
+    Type = factor(trimws(Type), levels = c("Forest", "Grassland")),
+    Plot = as.character(Plot)
+  )
+
+# -- 2. Prepare ratios
+ratios <- composite_data %>%
+  transmute(
+    Plot, Type,
+    Gamma_ind  = Gamma_q0_ind,
+    Gamma_comp = Gamma_q0_composite,
+    Ratio_q0   = ifelse(Gamma_q0_ind > 0,
+                        Gamma_q0_composite / Gamma_q0_ind,
+                        NA_real_),
+    log_ratio  = log(Gamma_q0_composite / Gamma_q0_ind)
+  ) %>%
+  filter(!is.na(Type), is.finite(Ratio_q0), Ratio_q0 > 0)
+
+# -- 3. Summary stats
+ratio_summary <- ratios %>%
+  group_by(Type) %>%
+  summarise(
+    n            = n(),
+    mean_ratio   = signif(mean(Ratio_q0),   5),
+    sd_ratio     = signif(sd(Ratio_q0),     5),
+    median_ratio = signif(median(Ratio_q0), 5),
+    IQR_ratio    = signif(IQR(Ratio_q0),    5),
+    .groups = "drop"
+  )
+
+print(ratio_summary)
+
+# -- 4. Tests
+
+## Ratio < 1 overall
+test_lt1_all <- wilcox.test(ratios$Ratio_q0, mu = 1,
+                             alternative = "less", exact = FALSE)
+print(test_lt1_all)
+
+## Ratio < 1 per ecosystem
+test_lt1_type <- ratios %>%
+  group_by(Type) %>%
+  group_modify(~ {
+    tt <- wilcox.test(.x$Ratio_q0, mu = 1, alternative = "less", exact = FALSE)
+    data.frame(W = unname(tt$statistic), p = tt$p.value)
+  }) %>%
+  ungroup()
+
+print(test_lt1_type)
+
+## Ratio differs between ecosystems
+test_type <- wilcox.test(Ratio_q0 ~ Type, data = ratios, exact = FALSE)
+print(test_type)
+
+## Rank preservation: Spearman correlation per ecosystem
+cor_by_type <- ratios %>%
+  group_by(Type) %>%
+  group_modify(~ {
+    ct <- cor.test(.x$Gamma_ind, .x$Gamma_comp,
+                   method = "spearman", exact = FALSE)
+    data.frame(rho = unname(ct$estimate), p = ct$p.value, n = nrow(.x))
+  }) %>%
+  ungroup()
+
+print(cor_by_type)
+
+## Variance compression
+var_compression <- ratios %>%
+  group_by(Type) %>%
+  summarise(
+    var_ind  = signif(var(Gamma_ind),  5),
+    var_comp = signif(var(Gamma_comp), 5),
+    var_ratio = signif(var(Gamma_comp) / var(Gamma_ind), 5),
+    .groups = "drop"
+  )
+
+print(var_compression)
+
+## Log-ratio < 0 per ecosystem
+test_logratio <- ratios %>%
+  group_by(Type) %>%
+  group_modify(~ {
+    tt <- wilcox.test(.x$log_ratio, mu = 0, alternative = "less", exact = FALSE)
+    data.frame(W = unname(tt$statistic), p = tt$p.value)
+  }) %>%
+  ungroup()
+
+print(test_logratio)
+
+
+wb <- createWorkbook()
+addWorksheet(wb, "Ratio_summary");      writeData(wb, "Ratio_summary",      ratio_summary)
+addWorksheet(wb, "Test_ratio_lt1");     writeData(wb, "Test_ratio_lt1",     test_lt1_type)
+addWorksheet(wb, "Spearman");           writeData(wb, "Spearman",           cor_by_type)
+addWorksheet(wb, "Variance_compression"); writeData(wb, "Variance_compression", var_compression)
+addWorksheet(wb, "Log_ratio_lt0");      writeData(wb, "Log_ratio_lt0",      test_logratio)
+saveWorkbook(wb, "Stats_Fig3.xlsx", overwrite = TRUE)
