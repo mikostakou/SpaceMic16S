@@ -1,0 +1,109 @@
+# Figure S1: Taxon richness distributions across sampling effort
+#            (N = 3, 6, 12, 14) and ecosystem types
+#
+# Rows:    3, 6, 12, 14 samples
+# Columns: Sample-level | Plot-level | Plot-level standardized |
+#          Composite samples (N=14 only)
+
+
+# ── 0. Packages
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggtext)
+library(openxlsx)
+
+setwd("path/to/your/16S/data")
+
+# -- 1. Load data
+sampling_data <- openxlsx::read.xlsx("16S_sampling_curves_individual.xlsx") %>%
+  mutate(
+    SampleSize = as.integer(SampleSize),
+    Type       = factor(trimws(Type), levels = c("Forest", "Grassland")),
+    Plot       = as.character(Plot)
+  ) %>%
+  filter(SampleSize %in% c(3, 6, 12, 14))
+
+composite_data <- openxlsx::read.xlsx("16S_plot_level_individual_vs_composite.xlsx") %>%
+  mutate(
+    Type = factor(trimws(Type), levels = c("Forest", "Grassland")),
+    Plot = as.character(Plot)
+  )
+
+# -- 2. Plot settings
+pal_type <- c("Forest" = "#228B22", "Grassland" = "#9ACD32")
+
+metric_labels <- c(
+  Alpha_q0     = "Individual cores<br><span style='font-size:12pt'>(sample-level, mean, n=14)</span>",
+  Gamma_q0     = "Plot-level<br><span style='font-size:12pt'>(sum, n=14)</span>",
+  GammaRare_q0 = "Plot-level standardized<br><span style='font-size:12pt'>(sum, n=14)</span>",
+  Composite    = "Composite samples<br><span style='font-size:12pt'>(plot-level, true composite)</span>"
+)
+
+sample_levels <- paste0(c(3, 6, 12, 14), " samples")
+
+# ── 3. Prepare data
+
+## Individual samples (3 metrics, N = 3, 6, 12, 14)
+nonpooled <- sampling_data %>%
+  pivot_longer(
+    cols      = c(Alpha_q0, Gamma_q0, GammaRare_q0),
+    names_to  = "Metric",
+    values_to = "Value"
+  ) %>%
+  mutate(
+    Metric = dplyr::recode(Metric,
+      Alpha_q0     = metric_labels[["Alpha_q0"]],
+      Gamma_q0     = metric_labels[["Gamma_q0"]],
+      GammaRare_q0 = metric_labels[["GammaRare_q0"]]
+    ),
+    Metric    = factor(Metric,    levels = unname(metric_labels)),
+    SampleRow = factor(paste0(SampleSize, " samples"), levels = sample_levels)
+  ) %>%
+  filter(!is.na(Type), is.finite(Value))
+
+## Composite samples (N=14 only)
+composite <- composite_data %>%
+  transmute(
+    Plot, Type,
+    SampleSize = 14L,
+    Metric     = factor(metric_labels[["Composite"]], levels = unname(metric_labels)),
+    SampleRow  = factor("14 samples", levels = sample_levels),
+    Value      = Gamma_q0_composite
+  ) %>%
+  filter(!is.na(Type), is.finite(Value))
+
+## Combined
+grid_dat <- bind_rows(nonpooled, composite) %>%
+  filter(!is.na(Metric), is.finite(Value))
+
+y_max <- max(grid_dat$Value, na.rm = TRUE)
+
+# -- 4. Build figure
+p <- ggplot(grid_dat, aes(Type, Value)) +
+  geom_jitter(color = "grey75", alpha = 0.12, size = 1.6,
+              width = 0.15, height = 0) +
+  geom_violin(aes(fill = Type, color = Type),
+              width = 0.85, alpha = 0.45, trim = TRUE) +
+  stat_summary(aes(color = Type),
+               fun.data = mean_sdl, fun.args = list(mult = 1),
+               geom = "pointrange", linewidth = 0.9) +
+  stat_summary(aes(fill = Type),
+               fun = mean, geom = "point",
+               shape = 21, size = 3, color = "black", stroke = 0.5) +
+  scale_fill_manual(values  = pal_type, guide = "none") +
+  scale_color_manual(values = pal_type, guide = "none") +
+  facet_grid(SampleRow ~ Metric, drop = FALSE) +
+  coord_cartesian(ylim = c(0, y_max)) +
+  labs(x = "", y = "Taxon Richness") +
+  theme_bw(base_size = 14) +
+  theme(
+    strip.background = element_rect(fill = "gray92", color = NA),
+    strip.text       = ggtext::element_markdown(face = "bold", size = 15, lineheight = 1.05),
+    axis.title.y     = element_text(size = 17),
+    axis.text        = element_text(size = 14)
+  )
+
+
+ggsave("FigS1_richness_distributions_by_N.png", p,
+       width = 11, height = 10, dpi = 600)
