@@ -4,7 +4,6 @@
 # Model: GAM, Gamma family, log-link:
 #        Gamma_q0 ~ s(Alpha_q0) + s(Extent)
 #        fit separately per Type
-# Points colored by Extent; lines by Type
 
 
   library(dplyr)
