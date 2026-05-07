@@ -1,0 +1,126 @@
+# Figure S10: Plot-level vs sample-level richness across
+#             spatial extent (GAM fits per ecosystem type)
+#
+# Model: GAM, Gamma family, log-link:
+#        Gamma_q0 ~ s(Alpha_q0) + s(Extent)
+#        fit separately per Type
+# Points colored by Extent; lines by Type
+
+
+  library(dplyr)
+  library(ggplot2)
+  library(mgcv)
+  library(scales)
+  library(ggnewscale)
+  library(openxlsx)
+
+setwd("path/to/your/16S/data")
+
+# -- 1. Load data
+sampling_data <- openxlsx::read.xlsx("16S_sampling_curves_individual.xlsx") %>%
+  mutate(
+    Type     = factor(trimws(Type), levels = c("Forest", "Grassland")),
+    Extent   = as.numeric(Extent),
+    Alpha_q0 = as.numeric(Alpha_q0),
+    Gamma_q0 = as.numeric(Gamma_q0)
+  ) %>%
+  filter(
+    is.finite(Alpha_q0), is.finite(Gamma_q0), is.finite(Extent),
+    Alpha_q0 > 0, Gamma_q0 > 0, Extent > 0
+  )
+
+# -- 2. Plot settings
+line_cols <- c("Forest" = "darkgreen", "Grassland" = "#7FBC41")
+
+# -- 3. Fit GAM per ecosystem type
+F_dat <- filter(sampling_data, Type == "Forest")
+G_dat <- filter(sampling_data, Type == "Grassland")
+
+mF <- gam(
+  Gamma_q0 ~ s(Alpha_q0, k = 6, bs = "cs") + s(Extent, k = 5, bs = "cs"),
+  data = F_dat, family = Gamma(link = "log"), method = "REML"
+)
+
+mG <- gam(
+  Gamma_q0 ~ s(Alpha_q0, k = 9, bs = "cs") + s(Extent, k = 5, bs = "cs"),
+  data = G_dat, family = Gamma(link = "log"), method = "REML"
+)
+
+# -- 4. Prediction grids (Alpha range 1-99%, Extent fixed at median per Type)
+
+## Helper: build grid and predict
+make_gam_preds <- function(model, dat, type_label) {
+  grid <- data.frame(
+    Alpha_q0 = seq(
+      quantile(dat$Alpha_q0, 0.01, na.rm = TRUE),
+      quantile(dat$Alpha_q0, 0.99, na.rm = TRUE),
+      length.out = 400
+    ),
+    Extent = median(dat$Extent, na.rm = TRUE),
+    Type   = factor(type_label, levels = c("Forest", "Grassland"))
+  )
+
+  pr <- predict(model, newdata = grid, type = "link", se.fit = TRUE)
+
+  grid %>%
+    mutate(
+      fit = exp(pr$fit),
+      lwr = exp(pr$fit - 1.96 * pr$se.fit),
+      upr = exp(pr$fit + 1.96 * pr$se.fit)
+    )
+}
+
+preds <- bind_rows(
+  make_gam_preds(mF, F_dat, "Forest"),
+  make_gam_preds(mG, G_dat, "Grassland")
+)
+
+# -- 5. Build figure
+p <- ggplot(sampling_data, aes(x = Alpha_q0, y = Gamma_q0)) +
+  geom_point(
+    aes(color = Extent),
+    size = 1.8, alpha = 0.20, na.rm = TRUE
+  ) +
+  scale_color_gradient(
+    low  = "#ADD8E6",
+    high = "#3B6FB6",
+    name = "Extent (m)",
+    guide = guide_colorbar(direction = "vertical", order = 1)
+  ) +
+  geom_ribbon(
+    data = preds,
+    aes(x = Alpha_q0, ymin = lwr, ymax = upr),
+    fill = "grey40", alpha = 0.20,
+    inherit.aes = FALSE
+  ) +
+  ggnewscale::new_scale_color() +
+  geom_line(
+    data = preds,
+    aes(x = Alpha_q0, y = fit, color = Type),
+    linewidth = 1.6,
+    inherit.aes = FALSE
+  ) +
+  scale_color_manual(
+    values = line_cols,
+    name   = "",
+    guide  = guide_legend(order = 2)
+  ) +
+  facet_wrap(~ Type, nrow = 1) +
+  scale_y_log10(
+    breaks = c(100, 1000, 10000),
+    labels = scales::label_number(big.mark = ".", decimal.mark = ",")
+  ) +
+  labs(x = "Sample-level richness", y = "Plot-level richness") +
+  theme_bw(base_size = 15) +
+  theme(
+    strip.background = element_blank(),
+    strip.text       = element_blank(),
+    legend.position  = "right",
+    legend.box       = "vertical",
+    axis.title       = element_text(size = 17),
+    axis.text        = element_text(size = 14)
+  )
+
+print(p)
+ggsave("FigS10_plot_sample_richness_extent.png", p,
+       width = 10, height = 6, dpi = 600)
