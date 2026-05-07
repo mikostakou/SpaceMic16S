@@ -1,0 +1,120 @@
+# Figure S11: Sample coverage vs Spatial Extent
+#             across sampling effort levels (N = 2 to 14)
+#
+# Model: Beta GLMM, logit-link: Gamma_SC_q0 ~ log(Extent) * Type + (1|Plot)
+#        fit separately per N, with centered/scaled log(Extent)
+
+
+  library(dplyr)
+  library(ggplot2)
+  library(glmmTMB)
+  library(ggnewscale)
+  library(openxlsx)
+
+setwd("path/to/your/16S/data")
+
+# -- 1. Load and prepare data
+sampling_data <- openxlsx::read.xlsx("16S_sampling_curves_individual.xlsx") %>%
+  mutate(
+    SampleSize = as.integer(SampleSize),
+    Type       = factor(trimws(Type), levels = c("Forest", "Grassland")),
+    Plot       = as.character(Plot)
+  ) %>%
+  filter(SampleSize %in% 2:14) %>%
+  drop_na(Extent, Gamma_SC_q0, Type, SampleSize, Plot) %>%
+  filter(is.finite(Extent), is.finite(Gamma_SC_q0), Extent > 0, Gamma_SC_q0 > 0) %>%
+  mutate(
+    SampleSizeF = factor(SampleSize, levels = 2:14),
+    SampleGroup = factor(paste0(SampleSize, " samples"),
+                         levels = paste0(2:14, " samples"))
+  )
+
+# -- 2. Plot settings
+pal_points <- c("Forest" = "forestgreen",  "Grassland" = "yellowgreen")
+pal_lines  <- c("Forest" = "darkgreen",    "Grassland" = "olivedrab4")
+
+# -- 3. Fit GLMM per N and build prediction grids
+
+## Helper: fit one model and return clipped prediction grid per Type
+fit_one <- function(dat, N) {
+  dd <- dat %>%
+    filter(SampleSize == N) %>%
+    droplevels()
+
+  if (nrow(dd) < 10)         return(NULL)
+  if (nlevels(dd$Type) < 2)  return(NULL)
+
+  lx <- log(dd$Extent)
+  if (!all(is.finite(lx)) || sd(lx) == 0) return(NULL)
+
+  # Center and scale log(Extent) within this N
+  cen <- mean(lx)
+  scl <- sd(lx)
+  dd  <- dd %>% mutate(logExt_c = (lx - cen) / scl)
+
+  m <- glmmTMB(
+    Gamma_SC_q0 ~ logExt_c * Type + (1 | Plot),
+    data   = dd,
+    family = beta_family(link = "logit")
+  )
+
+  grid <- dd %>%
+    group_by(Type) %>%
+    summarise(Extent_min = min(Extent), Extent_max = max(Extent), .groups = "drop") %>%
+    rowwise() %>%
+    do(data.frame(
+      Type   = .$Type,
+      Extent = seq(.$Extent_min, .$Extent_max, length.out = 120)
+    )) %>%
+    ungroup() %>%
+    mutate(
+      logExt_c   = (log(Extent) - cen) / scl,
+      SampleSize  = N,
+      SampleGroup = factor(paste0(N, " samples"),
+                           levels = paste0(2:14, " samples"))
+    )
+
+  grid$Pred <- predict(m, newdata = grid, type = "response", re.form = NA)
+  list(pred = grid)
+}
+
+fits    <- Filter(Negate(is.null), lapply(2:14, fit_one, dat = sampling_data))
+pred_df <- bind_rows(lapply(fits, `[[`, "pred"))
+
+# -- 4. Build figure
+set.seed(1)
+p <- ggplot(sampling_data, aes(x = Extent, y = Gamma_SC_q0)) +
+  geom_point(
+    aes(color = Type),
+    alpha = 0.30, size = 1.2
+  ) +
+  scale_color_manual(values = pal_points) +
+  ggnewscale::new_scale_color() +
+  geom_line(
+    data = pred_df,
+    aes(y = Pred, color = Type),
+    linewidth = 1.2
+  ) +
+  scale_color_manual(values = pal_lines) +
+  facet_wrap(~ SampleGroup, ncol = 4, scales = "free_x") +
+  labs(x = "Spatial extent (m)", y = "Sample coverage") +
+  theme_bw(base_size = 14) +
+  theme(
+    strip.background   = element_rect(fill = "grey92", color = NA),
+    strip.text         = element_text(face = "bold", size = 12),
+    axis.title.x       = element_text(size = 15),
+    axis.title.y       = element_text(size = 15),
+    axis.text          = element_text(size = 12),
+    legend.position    = "bottom",
+    legend.title       = element_blank(),
+    legend.text        = element_text(size = 15),
+    panel.grid.major.x = element_blank()
+  ) +
+  guides(color = guide_legend(
+    override.aes = list(shape = 16, size = 3, linewidth = 1.2, alpha = 1),
+    nrow = 1
+  ))
+
+print(p)
+ggsave("FigS11_coverage_extent_overlap.png", p,
+       width = 10, height = 10, dpi = 600)
