@@ -9,7 +9,7 @@ library(scales)
 setwd("path/to/your/16S/data")
 
 # -- 1. Load and prepare data
-sampling_data <- openxlsx::read.xlsx("Sampling100_Engel.xlsx") %>%
+sampling_data <- openxlsx::read.xlsx("16S_sampling_curves_individual.xlsx") %>%
   mutate(SampleSize = as.integer(SampleSize)) %>%
   filter(SampleSize %in% c(3, 6, 12)) %>%
   mutate(
