@@ -1,0 +1,90 @@
+# Figure S6: Standardized sample coverage across sampling effort
+#            (N = 3, 6, 12) by ecosystem type
+
+library(dplyr)
+library(ggplot2)
+library(openxlsx)
+library(scales)
+
+setwd("path/to/your/16S/data")
+
+# -- 1. Load and prepare data
+sampling_data <- openxlsx::read.xlsx("16S_sampling_curves_individual.xlsx") %>%
+  mutate(SampleSize = as.integer(SampleSize)) %>%
+  filter(SampleSize %in% c(3, 6, 12)) %>%
+  mutate(
+    SampleSizeF = factor(SampleSize, levels = c(3, 6, 12), labels = c("3", "6", "12")),
+    Type        = factor(Type, levels = c("Forest", "Grassland"))
+  ) %>%
+  filter(is.finite(GammaRare_SC_q0))
+
+# -- 2. Plot settings
+type_cols <- c("Forest" = "forestgreen", "Grassland" = "yellowgreen")
+
+zoom_range <- c(0.60, 1.00)
+
+# -- 3. Summary stats: one mean value per plot, then 95% CI across plots
+plot_means <- sampling_data %>%
+  group_by(Type, SampleSizeF, Plot) %>%
+  summarise(
+    StandardizedCoverage_mean = mean(GammaRare_SC_q0, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+sum_df <- plot_means %>%
+  group_by(Type, SampleSizeF) %>%
+  summarise(
+    n_plots = n(),
+    mean    = mean(StandardizedCoverage_mean, na.rm = TRUE),
+    sd      = sd(StandardizedCoverage_mean, na.rm = TRUE),
+    se      = sd / sqrt(n_plots),
+    tcrit   = qt(0.975, df = pmax(n_plots - 1, 1)),
+    ci_lo   = mean - tcrit * se,
+    ci_hi   = mean + tcrit * se,
+    .groups = "drop"
+  )
+
+# -- 4. Build figure
+set.seed(1)
+
+p <- ggplot(sampling_data, aes(SampleSizeF, GammaRare_SC_q0)) +
+  geom_point(
+    color = "grey80", alpha = 0.1, size = 1,
+    position = position_jitter(width = 0.18, height = 0),
+    na.rm = TRUE
+  ) +
+  geom_errorbar(
+    data = sum_df, inherit.aes = FALSE,
+    aes(SampleSizeF, ymin = ci_lo, ymax = ci_hi, color = Type),
+    width = 0.21, linewidth = 1, na.rm = TRUE
+  ) +
+  geom_point(
+    data = sum_df, inherit.aes = FALSE,
+    aes(SampleSizeF, mean, color = Type),
+    size = 3, na.rm = TRUE
+  ) +
+  facet_wrap(~ Type, nrow = 1) +
+  scale_color_manual(values = type_cols) +
+  scale_y_continuous(
+    limits = c(0, 1),
+    labels = scales::label_number(accuracy = 0.01)
+  ) +
+  coord_cartesian(ylim = zoom_range) +
+  labs(
+    x = "Sampling Effort",
+    y = "Coverage standardized"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(
+    strip.background = element_rect(fill = "white"),
+    strip.text       = element_text(face = "bold", size = 14),
+    legend.position  = "none"
+  )
+
+print(p)
+
+ggsave(
+  "FigS6_standardized_sample_coverage_by_N.png",
+  p,
+  width = 10, height = 6, dpi = 600
+)
