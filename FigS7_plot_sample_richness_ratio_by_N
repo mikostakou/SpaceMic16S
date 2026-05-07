@@ -85,7 +85,7 @@ p <- ggplot(sampling_data, aes(SampleSizeF, Beta_q0)) +
 print(p)
 
 ggsave(
-  "FigS7_richness_ratio_by_N_by_N.png",
+  "FigS7_plot_sample_richness_ratio_by_N.png",
   p,
   width = 10, height = 6, dpi = 600
 )
