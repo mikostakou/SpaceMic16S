@@ -1,0 +1,102 @@
+# Saturation tests: model comparison for richness response to sampling effort and spatial extent
+#
+# Response variables: Gamma_q0, GammaRare_q0
+# Predictors:        SampleSize, Extent
+# Models compared:   Log-linear, Square root, Asymptotic, Linear
+# Family:            Gamma(link = "log")
+
+  library(dplyr)
+  library(glmmTMB)
+  library(tibble)
+  library(openxlsx)
+
+setwd("path/to/your/16S/data")
+
+# -- 1. Load and prepare data
+sampling_data <- openxlsx::read.xlsx("16S_sampling_curves_individual.xlsx") %>%
+  mutate(
+    SampleSize = as.integer(SampleSize),
+    Extent     = as.numeric(Extent),
+    Type       = factor(trimws(Type), levels = c("Forest", "Grassland")),
+    Plot       = factor(Plot)
+  ) %>%
+  filter(
+    is.finite(Gamma_q0),    Gamma_q0    > 0,
+    is.finite(GammaRare_q0), GammaRare_q0 > 0,
+    is.finite(Extent),      Extent      > 0,
+    is.finite(SampleSize),  !is.na(Type)
+  )
+
+# -- 2. Helper: fit 4 models and return AIC table
+run_saturation_test <- function(dat, response, predictor) {
+
+  fml <- function(transform) {
+    as.formula(paste0(response, " ~ ", transform, " * Type + (1 | Plot)"))
+  }
+
+  trans <- switch(predictor,
+    SampleSize = list(
+      "Log-linear"  = paste0("log(", predictor, ")"),
+      "Square root" = paste0("sqrt(", predictor, ")"),
+      "Asymptotic"  = paste0("I(", predictor, " / (", predictor, " + 1))"),
+      "Linear"      = predictor
+    ),
+    Extent = list(
+      "Log-linear"  = paste0("log(", predictor, ")"),
+      "Square root" = paste0("sqrt(", predictor, ")"),
+      "Asymptotic"  = paste0("I(", predictor, " / (", predictor, " + 1))"),
+      "Linear"      = predictor
+    )
+  )
+
+  models <- lapply(trans, function(t) {
+    glmmTMB(fml(t), data = dat, family = Gamma(link = "log"))
+  })
+
+  aic_vals <- sapply(models, AIC)
+
+  data.frame(
+    Response    = response,
+    Predictor   = predictor,
+    Model       = names(trans),
+    AIC         = aic_vals,
+    delta_AIC   = aic_vals - min(aic_vals),
+    row.names   = NULL
+  ) %>%
+    arrange(delta_AIC)
+}
+
+# -- 3. Prepare plot-level means
+
+## Per SampleSize
+df_N <- sampling_data %>%
+  group_by(Plot, Type, SampleSize) %>%
+  summarise(
+    Gamma_q0     = mean(Gamma_q0,     na.rm = TRUE),
+    GammaRare_q0 = mean(GammaRare_q0, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+## Per Extent
+df_E <- sampling_data %>%
+  group_by(Plot, Type, Extent) %>%
+  summarise(
+    Gamma_q0     = mean(Gamma_q0,     na.rm = TRUE),
+    GammaRare_q0 = mean(GammaRare_q0, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# -- 4. Run all saturation tests
+results <- bind_rows(
+  run_saturation_test(df_N, "Gamma_q0",     "SampleSize"),
+  run_saturation_test(df_N, "GammaRare_q0", "SampleSize"),
+  run_saturation_test(df_E, "Gamma_q0",     "Extent"),
+  run_saturation_test(df_E, "GammaRare_q0", "Extent")
+)
+
+print(results)
+
+wb <- createWorkbook()
+addWorksheet(wb, "Saturation_AIC")
+writeData(wb, "Saturation_AIC", results)
+saveWorkbook(wb, "Saturation_model_comparison.xlsx", overwrite = TRUE)
