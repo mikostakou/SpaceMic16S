@@ -46,7 +46,7 @@ p <- ggplot(ratios, aes(x = Type, y = Ratio_q0)) +
   scale_fill_manual(values  = pal_type, guide = "none") +
   scale_color_manual(values = pal_type, guide = "none") +
   coord_cartesian(ylim = c(0, 1.02)) +
-  labs(x = "", y = expression(gamma[comp] / gamma[ind] ~ richness)) +
+  labs(x = "", y = "True composite / in silico\nplot-level richness ratio") + 
   theme_bw(base_size = 12) +
   theme(
     strip.background = element_rect(fill = "white", color = "black"),
