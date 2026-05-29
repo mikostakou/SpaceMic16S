@@ -1,7 +1,6 @@
-# Figure 2: Taxon richness distributions across ecosystem types at N = 14 cores (individual + composite)
+# Figure 2: ASV richness distributions across ecosystem types at N = 14 cores (individual + composite)
 #
 # Panels: Sample-level | Plot-level | Plot-level standardized | Composite Samples
-
 
 library(dplyr)
 library(tidyr)
@@ -12,13 +11,21 @@ library(openxlsx)
 setwd("path/to/your/16S/data")
 
 # -- 1. Load data
+# Aggregate across replicates per plot to avoid pseudoreplication
 sampling_data <- openxlsx::read.xlsx("16S_sampling_curves_individual.xlsx") %>%
   mutate(
     SampleSize = as.integer(SampleSize),
     Type       = factor(trimws(Type), levels = c("Forest", "Grassland")),
     Plot       = as.character(Plot)
   ) %>%
-  filter(SampleSize == 14)
+  filter(SampleSize == 14) %>%
+  group_by(Plot, Type) %>%
+  summarise(
+    Alpha_q0     = mean(Alpha_q0,     na.rm = TRUE),
+    Gamma_q0     = mean(Gamma_q0,     na.rm = TRUE),
+    GammaRare_q0 = mean(GammaRare_q0, na.rm = TRUE),
+    .groups = "drop"
+  )
 
 composite_data <- openxlsx::read.xlsx("16S_plot_level_individual_vs_composite.xlsx") %>%
   mutate(
@@ -38,7 +45,7 @@ metric_labels <- c(
 
 # -- 3. Prepare data
 
-## Individual cores (3 metrics at N=14)
+## Individual cores (3 metrics at N=14, averaged across replicates per plot)
 nonpooled14 <- sampling_data %>%
   pivot_longer(
     cols      = c(Alpha_q0, Gamma_q0, GammaRare_q0),
@@ -52,7 +59,7 @@ nonpooled14 <- sampling_data %>%
   )) %>%
   filter(!is.na(Type), is.finite(Value))
 
-## Composite cores (plot-level richness from one composite sample per plot)
+## Composite samples (one true composite per plot)
 composite14 <- composite_data %>%
   transmute(
     Plot, Type,
@@ -69,7 +76,7 @@ y_max <- max(dat14$Value, na.rm = TRUE)
 
 # -- 4. Build figure
 p <- ggplot(dat14, aes(x = Type, y = Value)) +
-  geom_jitter(color = "grey75", alpha = 0.15, size = 1.8,
+  geom_jitter(color = "grey75", alpha = 0.8, size = 2.5,
               width = 0.15, height = 0) +
   geom_violin(aes(fill = Type, color = Type),
               width = 0.85, alpha = 0.45, trim = TRUE) +
@@ -83,15 +90,16 @@ p <- ggplot(dat14, aes(x = Type, y = Value)) +
   scale_color_manual(values = pal_type, guide = "none") +
   facet_wrap(~ Metric, ncol = 4, scales = "fixed") +
   coord_cartesian(ylim = c(0, y_max)) +
-  labs(x = "", y = "Taxon Richness") +
+  labs(x = "", y = "ASV Richness") +
   theme_bw(base_size = 16) +
   theme(
     strip.background = element_rect(fill = "gray92", color = NA),
     strip.text       = ggtext::element_markdown(face = "bold", size = 12, lineheight = 1.05),
     axis.title       = element_text(size = 16),
-    axis.text        = element_text(size = 12)
+    axis.text        = element_text(size = 20)
   )
 
 print(p)
+
 ggsave("Fig2_richness_distributions_N14.png", p,
        width = 12, height = 6, dpi = 600, bg = "white")
