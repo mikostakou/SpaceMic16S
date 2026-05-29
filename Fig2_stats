@@ -1,23 +1,31 @@
-# Figure 2 stats: Taxon richness distributions at N = 14
+# Figure 2 stats: ASV richness distributions at N = 14
 #
 # Test: Wilcoxon rank-sum (Forest vs Grassland) per metric
-# Correction: Holm across the 4 metrics in the final panel
+# Correction: Holm across the 4 metrics
+# Note: sampling_data averaged across replicates per plot before testing
 
-
-  library(dplyr)
-  library(tidyr)
-  library(openxlsx)
+library(dplyr)
+library(tidyr)
+library(openxlsx)
 
 setwd("path/to/your/16S/data")
 
 # -- 1. Load data
+# Aggregate across replicates per plot to avoid pseudoreplication
 sampling_data <- openxlsx::read.xlsx("16S_sampling_curves_individual.xlsx") %>%
   mutate(
     SampleSize = as.integer(SampleSize),
     Type       = factor(trimws(Type), levels = c("Forest", "Grassland")),
     Plot       = as.character(Plot)
   ) %>%
-  filter(SampleSize == 14)
+  filter(SampleSize == 14) %>%
+  group_by(Plot, Type) %>%
+  summarise(
+    Alpha_q0     = mean(Alpha_q0,     na.rm = TRUE),
+    Gamma_q0     = mean(Gamma_q0,     na.rm = TRUE),
+    GammaRare_q0 = mean(GammaRare_q0, na.rm = TRUE),
+    .groups = "drop"
+  )
 
 composite_data <- openxlsx::read.xlsx("16S_plot_level_individual_vs_composite.xlsx") %>%
   mutate(
@@ -62,9 +70,7 @@ wilcox_one <- function(dat, metric_label) {
   sub <- filter(dat, Metric == metric_label)
   sf  <- sub %>% filter(Type == "Forest")    %>% pull(Value)
   sg  <- sub %>% filter(Type == "Grassland") %>% pull(Value)
-
-  wt <- wilcox.test(sf, sg, exact = FALSE)
-
+  wt  <- wilcox.test(sf, sg, exact = FALSE)
   data.frame(
     Metric         = as.character(metric_label),
     n_Forest       = length(sf),
