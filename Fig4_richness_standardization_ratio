@@ -64,7 +64,7 @@ p <- ggplot(sampling_data, aes(SampleSizeF, Ratio_q0)) +
   scale_color_manual(values = type_cols, name = NULL) +
   labs(
     x = "Sampling Effort",
-    y = "Plot-level richness (standardized / observed)"
+    y = "Plot-level richness (standardized / unstandardized)"
   ) +
   theme_bw(base_size = 17) +
   theme(
