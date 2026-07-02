@@ -5,8 +5,8 @@ R workflows for evaluating how spatial sampling design affects microbial diversi
 
 ### R code for the manuscript
 
-> **"The illusion of diversity: sampling design drives conflicting estimates of soil bacterial richness"**
-> Kostakou et al. *(in preparation).*
+> **Kostakou et al., 2026** *"The illusion of diversity: sampling design drives conflicting estimates of soil bacterial richness"*
+> 
 
 This repository contains the R code underlying the analyses, statistics, and figures presented in the manuscript. The scripts allow full reproduction of the main data-processing steps, statistical models, and figures. 
 
