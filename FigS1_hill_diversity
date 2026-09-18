@@ -1,0 +1,251 @@
+# Figure S1: q0, q1 and q2 diversity accumulation
+#
+# Models use one value per Plot x sampling effort.
+# Observed and standardized diversity are analysed separately.
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(glmmTMB)
+library(emmeans)
+library(car)
+library(openxlsx)
+
+options(contrasts = c("contr.sum", "contr.poly"))
+
+metrics <- c(
+  "Gamma_q0", "GammaRare_q0",
+  "Gamma_q1", "GammaRare_q1",
+  "Gamma_q2", "GammaRare_q2"
+)
+
+raw <- readRDS("Sampling_Engel_100reps_updated.rds") %>%
+  mutate(
+    Plot = factor(Plot),
+    Type = factor(trimws(Type), levels = c("Grassland", "Forest")),
+    Exploratory = factor(Exploratory),
+    SampleSize = as.integer(SampleSize)
+  )
+
+# Average repeated simulations within Plot x sampling effort
+
+dat <- raw %>%
+  group_by(Plot, Type, Exploratory, SampleSize) %>%
+  summarise(
+    across(all_of(metrics), ~ mean(.x, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  mutate(logN = log(SampleSize))
+
+long <- dat %>%
+  pivot_longer(
+    all_of(metrics),
+    names_to = "Metric",
+    values_to = "Value"
+  )
+
+
+# Models
+
+mods <- split(long, long$Metric) |>
+  lapply(\(d)
+    glmmTMB(
+      Value ~ logN * Type + Exploratory + (1 | Plot),
+      family = Gamma(link = "log"),
+      data = d
+    )
+  )
+
+
+# Statistics
+
+typeIII <- bind_rows(lapply(names(mods), function(x) {
+  a <- as.data.frame(car::Anova(mods[[x]], type = 3))
+  data.frame(Metric = x, Term = rownames(a), a, row.names = NULL)
+}))
+
+slopes <- bind_rows(lapply(names(mods), function(x) {
+  as.data.frame(
+    summary(emtrends(mods[[x]], ~ Type, var = "logN"), infer = TRUE)
+  ) %>%
+    mutate(Metric = x)
+}))
+
+slope_contrasts <- bind_rows(lapply(names(mods), function(x) {
+  tr <- emtrends(mods[[x]], ~ Type, var = "logN")
+  as.data.frame(summary(pairs(tr), infer = TRUE)) %>%
+    mutate(Metric = x)
+}))
+
+
+# Predictions averaged across regions
+
+make_preds <- function(model, metric) {
+
+  g <- expand.grid(
+    SampleSize = 1:14,
+    Type = levels(dat$Type),
+    Exploratory = levels(dat$Exploratory),
+    Plot = levels(dat$Plot)[1]
+  ) %>%
+    mutate(
+      logN = log(SampleSize),
+      Type = factor(Type, levels = levels(dat$Type)),
+      Exploratory = factor(Exploratory, levels = levels(dat$Exploratory)),
+      Plot = factor(Plot, levels = levels(dat$Plot))
+    )
+
+  pr <- predict(
+    model,
+    newdata = g,
+    type = "link",
+    se.fit = TRUE,
+    re.form = NA
+  )
+
+  g %>%
+    mutate(
+      Mean = exp(pr$fit),
+      Lower = exp(pr$fit - 1.96 * pr$se.fit),
+      Upper = exp(pr$fit + 1.96 * pr$se.fit)
+    ) %>%
+    group_by(Type, SampleSize) %>%
+    summarise(
+      across(c(Mean, Lower, Upper), mean),
+      .groups = "drop"
+    ) %>%
+    mutate(Metric = metric)
+}
+
+pred <- bind_rows(
+  Map(make_preds, mods, names(mods))
+)
+
+
+# Facet labels
+
+add_facets <- function(x) {
+  x %>%
+    mutate(
+      Hill = case_when(
+        grepl("q0$", Metric) ~ "q0 richness",
+        grepl("q1$", Metric) ~ "q1 diversity",
+        grepl("q2$", Metric) ~ "q2 diversity"
+      ),
+      Standardization = ifelse(
+        grepl("Rare", Metric),
+        "Standardized",
+        "Observed"
+      ),
+      Hill = factor(
+        Hill,
+        levels = c("q0 richness", "q1 diversity", "q2 diversity")
+      ),
+      Standardization = factor(
+        Standardization,
+        levels = c("Observed", "Standardized")
+      )
+    )
+}
+
+pred <- add_facets(pred)
+
+points <- raw %>%
+  pivot_longer(
+    all_of(metrics),
+    names_to = "Metric",
+    values_to = "Value"
+  ) %>%
+  filter(is.finite(Value), Value > 0) %>%
+  add_facets()
+
+
+# Figure S1
+
+point_cols <- c(
+  Grassland = "yellowgreen",
+  Forest = "green4"
+)
+
+line_cols <- c(
+  Grassland = "olivedrab",
+  Forest = "darkgreen"
+)
+
+p <- ggplot() +
+  geom_point(
+    data = points,
+    aes(SampleSize, Value, colour = Type),
+    alpha = 0.05,
+    size = 0.7
+  ) +
+  geom_ribbon(
+    data = pred,
+    aes(SampleSize, ymin = Lower, ymax = Upper, fill = Type),
+    alpha = 0.20,
+    colour = NA
+  ) +
+  geom_line(
+    data = filter(pred, Type == "Grassland"),
+    aes(SampleSize, Mean),
+    colour = line_cols["Grassland"],
+    linewidth = 1.15
+  ) +
+  geom_line(
+    data = filter(pred, Type == "Forest"),
+    aes(SampleSize, Mean),
+    colour = line_cols["Forest"],
+    linewidth = 1.15
+  ) +
+  scale_colour_manual(values = point_cols, guide = "none") +
+  scale_fill_manual(values = point_cols, guide = "none") +
+  facet_grid(
+    Hill ~ Standardization,
+    scales = "free_y"
+  ) +
+  scale_x_continuous(
+    breaks = c(1, 3, 5, 7, 9, 11, 14)
+  ) +
+  labs(
+    x = "Sampling effort",
+    y = "Plot-level diversity"
+  ) +
+  theme_bw(base_size = 15) +
+  theme(
+    strip.background = element_rect(fill = "grey92", colour = "grey50"),
+    strip.text = element_text(face = "bold", size = 12),
+    strip.text.y = element_text(angle = -90),
+    panel.grid.major = element_line(colour = "grey88", linewidth = 0.5),
+    panel.grid.minor = element_blank()
+  )
+
+
+# Save outputs
+
+ggsave(
+  "FigS1_q0_q1_q2.png",
+  p,
+  width = 9,
+  height = 12,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  "FigS1_q0_q1_q2.pdf",
+  p,
+  width = 9,
+  height = 12,
+  device = cairo_pdf,
+  bg = "white"
+)
+
+write.xlsx(
+  list(
+    TypeIII = typeIII,
+    Slopes = slopes,
+    Slope_contrasts = slope_contrasts
+  ),
+  "FigS1_stats.xlsx",
+  overwrite = TRUE
+)
