@@ -12,7 +12,7 @@ This repository contains the R code underlying the analyses, statistics, and fig
 
 This study evaluates how soil **sampling design** shapes estimates of bacterial diversity across forest and grassland ecosystems in the German Biodiversity Exploratories.
 
-The central question is how estimates of soil bacterial **richness**, **sample coverage**, and **spatial scaling** change when diversity is inferred from *individual soil cores* versus *composite (physically pooled) samples* — and how these patterns shift under **sequencing-depth standardization**. A recurring result is that seemingly minor design choices can reverse ecological conclusions (e.g. which ecosystem appears more diverse), hence the "illusion of diversity."
+The central question is how estimates of soil bacterial **richness**, **sample coverage**, and **spatial scaling** change when diversity is inferred from *individual soil cores* versus *composite (physically composited) samples* — and how these patterns shift under **sequencing-depth standardization**. A recurring result is that seemingly minor design choices can reverse ecological conclusions (e.g. which ecosystem appears more diverse), hence the "illusion of diversity."
 
 
 
@@ -24,7 +24,7 @@ The central question is how estimates of soil bacterial **richness**, **sample c
 | **Ecosystems** | Forest and grassland soils |
 | **Plots** | 57 plots across the three Exploratories |
 | **Sampling design** | 14 individual soil cores per plot |
-| **Composite samples** | Physical homogenization of soil cores at the plot level |
+| **Composite samples** | Physical compositing of soil cores at the plot level |
 | **Target marker** | 16S rRNA gene |
 | **Sequencing** | Paired-end amplicon sequencing |
 
@@ -40,20 +40,20 @@ The repository includes scripts for:
 - rarefying sequencing depth;
 - generating plot-wise spatial subsampling scenarios;
 - estimating richness and sample coverage across increasing sampling effort;
-- comparing individual-based and composite-sample diversity estimates;
+- comparing individual-core and composite-sample diversity estimates;
 - evaluating richness scaling with spatial extent;
-- fitting the generalized linear mixed models (GLMMs) associated with each analysis;
-- producing the main and supplementary figures.
+- fitting the statistical models associated with each analysis;
+- producing the main and supplementary figures
 
 
 
 ## Data availability
 
- **Raw sequence data:** deposited at NCBI under BioProject accession number `[PRJNA1242586]`.
- **Metadata:** available through the Biodiversity Exploratories Information System (BExIS)(https://doi.org/10.17616/R32P9Q):
- - sample metadata - BExIS ID 32361, https://doi.org/10.71615/bexis.32361; 
- - taxonomic assignments - BExIS ID 32394, https://doi.org/10.71615/bexis.32394; 
- - sequence variant abundance data - BExIS ID 32420, https://doi.org/10.71615/bexis.32420.
+ **Raw sequence data:** deposited at NCBI under BioProject accession number `[PRJNA1242586]`
+ **Metadata:** available through the Biodiversity Exploratories Information System (BExIS)(https://doi.org/10.17616/R32P9Q)
+ - sample metadata - BExIS ID 32361, https://doi.org/10.71615/bexis.32361
+ - taxonomic assignments - BExIS ID 32482, https://doi.org/10.71615/bexis.32482
+ - sequence variant abundance data - BExIS ID 32481, https://doi.org/10.71615/bexis.32481
 
 
 
