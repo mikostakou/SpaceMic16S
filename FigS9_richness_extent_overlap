@@ -1,0 +1,194 @@
+# Figure S9: Observed plot-level richness vs spatial extent
+# across sampling effort (N = 2–14 cores)
+
+library(dplyr)
+library(ggplot2)
+library(glmmTMB)
+library(ggnewscale)
+
+raw <- readRDS("spatial_subsampling.rds") %>%
+  mutate(
+    SampleSize = as.integer(SampleSize),
+    Type = factor(trimws(Type), levels = c("Forest", "Grassland")),
+    Plot = factor(Plot),
+    Exploratory = factor(Exploratory)
+  )
+
+# Average repeated occurrences of the same core subset
+
+points <- raw %>%
+  filter(
+    SampleSize %in% 2:14,
+    MaxExtent > 0,
+    is.finite(Gamma_q0),
+    Gamma_q0 > 0
+  ) %>%
+  group_by(
+    Plot, Type, Exploratory,
+    SampleSize, CoreIndices, MaxExtent
+  ) %>%
+  summarise(
+    Gamma_q0 = mean(Gamma_q0, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    SampleGroup = factor(
+      paste0(SampleSize, " cores"),
+      levels = paste0(2:14, " cores")
+    )
+  )
+
+
+# Models by sampling effort
+
+fit_one <- function(N) {
+
+  d <- points %>%
+    filter(SampleSize == N) %>%
+    droplevels()
+
+  extent_check <- d %>%
+    group_by(Type) %>%
+    summarise(n = n_distinct(MaxExtent), .groups = "drop")
+
+  if (nrow(extent_check) < 2 || any(extent_check$n < 2)) {
+    return(NULL)
+  }
+
+  lx <- log(d$MaxExtent)
+  centre <- mean(lx)
+  scale <- sd(lx)
+
+  d$logExtent <- (lx - centre) / scale
+
+  model <- glmmTMB(
+    Gamma_q0 ~ logExtent * Type + Exploratory + (1 | Plot),
+    data = d,
+    family = Gamma(link = "log")
+  )
+
+  ranges <- d %>%
+    group_by(Type) %>%
+    summarise(
+      xmin = min(MaxExtent),
+      xmax = max(MaxExtent),
+      .groups = "drop"
+    )
+
+  grid <- bind_rows(
+    lapply(seq_len(nrow(ranges)), function(i) {
+
+      expand.grid(
+        Type = as.character(ranges$Type[i]),
+        MaxExtent = seq(
+          ranges$xmin[i],
+          ranges$xmax[i],
+          length.out = 120
+        ),
+        Exploratory = levels(d$Exploratory)
+      )
+    })
+  ) %>%
+    mutate(
+      Type = factor(Type, levels = levels(d$Type)),
+      Exploratory = factor(Exploratory, levels = levels(d$Exploratory)),
+      logExtent = (log(MaxExtent) - centre) / scale
+    )
+
+  grid$Pred <- predict(
+    model,
+    newdata = grid,
+    type = "response",
+    re.form = NA
+  )
+
+  grid %>%
+    group_by(Type, MaxExtent) %>%
+    summarise(
+      Pred = mean(Pred),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      SampleSize = N,
+      SampleGroup = factor(
+        paste0(N, " cores"),
+        levels = paste0(2:14, " cores")
+      )
+    )
+}
+
+pred <- bind_rows(lapply(2:14, fit_one))
+
+
+# Figure S8
+
+point_cols <- c(
+  Forest = "green4",
+  Grassland = "yellowgreen"
+)
+
+line_cols <- c(
+  Forest = "darkgreen",
+  Grassland = "olivedrab"
+)
+
+p <- ggplot() +
+  geom_point(
+    data = points,
+    aes(MaxExtent, Gamma_q0, colour = Type),
+    alpha = 0.10,
+    size = 1
+  ) +
+  scale_colour_manual(
+    values = point_cols,
+    guide = "none"
+  ) +
+  ggnewscale::new_scale_colour() +
+  geom_line(
+    data = pred,
+    aes(MaxExtent, Pred, colour = Type),
+    linewidth = 1.15
+  ) +
+  scale_colour_manual(
+    values = line_cols,
+    name = NULL
+  ) +
+  facet_wrap(
+    ~ SampleGroup,
+    ncol = 4,
+    drop = FALSE
+  ) +
+  scale_x_continuous(
+    breaks = c(0, 6, 12, 18, 24, 30, 36)
+  ) +
+  labs(
+    x = "Maximum pairwise distance (m)",
+    y = "Observed plot-level richness"
+  ) +
+  theme_bw(base_size = 15) +
+  theme(
+    legend.position = "bottom",
+    strip.background = element_rect(fill = "grey92"),
+    strip.text = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    axis.text = element_text(size = 14),
+    axis.title = element_text(size = 17)
+  )
+
+ggsave(
+  "FigS9_observed_richness_max_distance.png",
+  p,
+  width = 12,
+  height = 10,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  "FigS9_observed_richness_max_distance.pdf",
+  p,
+  width = 12,
+  height = 10,
+  device = cairo_pdf,
+  bg = "white"
+)
