@@ -1,88 +1,110 @@
-# Figure S3: Plot-level richness across sampling effort
-#            (N = 3, 6, 12) by ecosystem type
+# Figure S3: Observed plot-level richness across sampling effort
 
 library(dplyr)
 library(ggplot2)
-library(openxlsx)
 
-setwd("path/to/your/16S/data")
-
-# -- 1. Load and prepare data
-sampling_data <- openxlsx::read.xlsx("Sampling100_Engel.xlsx") %>%
-  mutate(SampleSize = as.integer(SampleSize)) %>%
-  filter(SampleSize %in% c(3, 6, 12)) %>%
+raw <- readRDS("spatial_subsampling.rds") %>%
   mutate(
-    SampleSizeF = factor(SampleSize, levels = c(3, 6, 12), labels = c("3", "6", "12")),
-    Type        = factor(Type, levels = c("Forest", "Grassland"))
+    SampleSize = as.integer(SampleSize),
+    Type = factor(trimws(Type), levels = c("Forest", "Grassland"))
   ) %>%
-  filter(is.finite(Gamma_q0))
+  filter(
+    SampleSize %in% c(3, 6, 12),
+    is.finite(Gamma_q0)
+  )
 
-# -- 2. Plot settings
-type_cols <- c("Forest" = "forestgreen", "Grassland" = "yellowgreen")
+# Average repeated occurrences of the same core subset
 
-y_limits <- range(
-  c(sampling_data$Gamma_q0, sampling_data$GammaRare_q0),
-  na.rm = TRUE
+points <- raw %>%
+  group_by(Plot, Type, Exploratory, SampleSize, CoreIndices) %>%
+  summarise(
+    Gamma_q0 = mean(Gamma_q0, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Plot-level means and 95% confidence intervals
+
+summary_df <- raw %>%
+  group_by(Plot, Type, SampleSize) %>%
+  summarise(
+    Gamma_q0 = mean(Gamma_q0, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  group_by(Type, SampleSize) %>%
+  summarise(
+    n = n(),
+    mean = mean(Gamma_q0),
+    se = sd(Gamma_q0) / sqrt(n),
+    lo = mean - qt(0.975, n - 1) * se,
+    hi = mean + qt(0.975, n - 1) * se,
+    .groups = "drop"
+  )
+
+cols <- c(
+  Forest = "forestgreen",
+  Grassland = "yellowgreen"
 )
 
-# -- 3. Summary stats: one mean value per plot, then 95% CI across plots
-plot_means <- sampling_data %>%
-  group_by(Type, SampleSizeF, Plot) %>%
-  summarise(
-    Gamma_mean = mean(Gamma_q0, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-sum_df <- plot_means %>%
-  group_by(Type, SampleSizeF) %>%
-  summarise(
-    n_plots = n(),
-    mean    = mean(Gamma_mean),
-    sd      = sd(Gamma_mean),
-    se      = sd / sqrt(n_plots),
-    tcrit   = qt(0.975, df = pmax(n_plots - 1, 1)),
-    ci_lo   = mean - tcrit * se,
-    ci_hi   = mean + tcrit * se,
-    .groups = "drop"
-  )
-
-# -- 4. Build figure
-set.seed(1)
-
-p <- ggplot(sampling_data, aes(SampleSizeF, Gamma_q0)) +
+p <- ggplot(points, aes(factor(SampleSize), Gamma_q0)) +
   geom_point(
-    color = "grey80", alpha = 0.1, size = 1,
-    position = position_jitter(width = 0.18, height = 0),
-    na.rm = TRUE
+    colour = "grey80",
+    alpha = 0.1,
+    size = 1,
+    position = position_jitter(
+      width = 0.15,
+      height = 0,
+      seed = 1
+    )
   ) +
-  geom_errorbar(
-    data = sum_df, inherit.aes = FALSE,
-    aes(SampleSizeF, ymin = ci_lo, ymax = ci_hi, color = Type),
-    width = 0.21, linewidth = 1, na.rm = TRUE
+  geom_linerange(
+    data = summary_df,
+    aes(
+      x = factor(SampleSize),
+      ymin = lo,
+      ymax = hi,
+      colour = Type
+    ),
+    inherit.aes = FALSE,
+    linewidth = 1
   ) +
   geom_point(
-    data = sum_df, inherit.aes = FALSE,
-    aes(SampleSizeF, mean, color = Type),
-    size = 3, na.rm = TRUE
+    data = summary_df,
+    aes(
+      x = factor(SampleSize),
+      y = mean,
+      colour = Type
+    ),
+    inherit.aes = FALSE,
+    size = 3
   ) +
   facet_wrap(~ Type, nrow = 1) +
-  scale_color_manual(values = type_cols) +
-  coord_cartesian(ylim = y_limits) +
+  scale_colour_manual(values = cols, name = NULL) +
   labs(
-    x = "Sampling Effort",
-    y = "Plot-level richness"
+    x = "Sampling effort",
+    y = "Observed plot-level richness"
   ) +
   theme_bw(base_size = 13) +
   theme(
-    strip.background = element_rect(fill = "white"),
-    strip.text       = element_text(face = "bold", size = 14),
-    legend.position  = "none"
+    strip.text = element_blank(),
+    strip.background = element_blank(),
+    legend.position = "bottom",
+    panel.grid.minor = element_blank()
   )
-
-print(p)
 
 ggsave(
   "FigS3_plot_richness_by_N.png",
   p,
-  width = 10, height = 6, dpi = 600
+  width = 10,
+  height = 6,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  "FigS3_plot_richness_by_N.pdf",
+  p,
+  width = 10,
+  height = 6,
+  device = cairo_pdf,
+  bg = "white"
 )
