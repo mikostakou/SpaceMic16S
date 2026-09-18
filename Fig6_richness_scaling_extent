@@ -16,7 +16,7 @@ library(openxlsx)
 
 options(contrasts = c("contr.sum", "contr.poly"))
 
-raw <- readRDS("Sampling_Engel_100reps_updated.rds") %>%
+raw <- readRDS("spatial_subsampling.rds") %>%
   mutate(
     Type = factor(trimws(Type), levels = c("Grassland", "Forest")),
     Plot = factor(Plot),
