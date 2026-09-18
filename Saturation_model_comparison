@@ -1,102 +1,168 @@
-# Saturation tests: model comparison for richness response to sampling effort and spatial extent
-#
-# Response variables: Gamma_q0, GammaRare_q0
-# Predictors:        SampleSize, Extent
-# Models compared:   Log-linear, Square root, Asymptotic, Linear
-# Family:            Gamma(link = "log")
+# Table S6: Model comparison for richness responses
+# to sampling effort and spatial extent
 
-  library(dplyr)
-  library(glmmTMB)
-  library(tibble)
-  library(openxlsx)
+library(dplyr)
+library(glmmTMB)
+library(openxlsx)
 
-setwd("path/to/your/16S/data")
-
-# -- 1. Load and prepare data
-sampling_data <- openxlsx::read.xlsx("16S_sampling_curves_individual.xlsx") %>%
+raw <- readRDS("spatial_subsampling.rds") %>%
   mutate(
     SampleSize = as.integer(SampleSize),
-    Extent     = as.numeric(Extent),
-    Type       = factor(trimws(Type), levels = c("Forest", "Grassland")),
-    Plot       = factor(Plot)
-  ) %>%
-  filter(
-    is.finite(Gamma_q0),    Gamma_q0    > 0,
-    is.finite(GammaRare_q0), GammaRare_q0 > 0,
-    is.finite(Extent),      Extent      > 0,
-    is.finite(SampleSize),  !is.na(Type)
+    Type = factor(trimws(Type), levels = c("Grassland", "Forest")),
+    Exploratory = factor(Exploratory),
+    Plot = factor(Plot)
   )
 
-# -- 2. Helper: fit 4 models and return AIC table
-run_saturation_test <- function(dat, response, predictor) {
 
-  fml <- function(transform) {
-    as.formula(paste0(response, " ~ ", transform, " * Type + (1 | Plot)"))
-  }
+# Sampling effort
 
-  trans <- switch(predictor,
-    SampleSize = list(
-      "Log-linear"  = paste0("log(", predictor, ")"),
-      "Square root" = paste0("sqrt(", predictor, ")"),
-      "Asymptotic"  = paste0("I(", predictor, " / (", predictor, " + 1))"),
-      "Linear"      = predictor
+effort_dat <- raw %>%
+  group_by(Plot, Type, Exploratory, SampleSize) %>%
+  summarise(
+    Gamma_q0 = mean(Gamma_q0, na.rm = TRUE),
+    GammaRare_q0 = mean(GammaRare_q0, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+compare_effort <- function(response) {
+
+  formulas <- list(
+    "Log-linear" = as.formula(
+      paste0(
+        response,
+        " ~ log(SampleSize) * Type + Exploratory + (1 | Plot)"
+      )
     ),
-    Extent = list(
-      "Log-linear"  = paste0("log(", predictor, ")"),
-      "Square root" = paste0("sqrt(", predictor, ")"),
-      "Asymptotic"  = paste0("I(", predictor, " / (", predictor, " + 1))"),
-      "Linear"      = predictor
+    "Square root" = as.formula(
+      paste0(
+        response,
+        " ~ sqrt(SampleSize) * Type + Exploratory + (1 | Plot)"
+      )
+    ),
+    "Asymptotic" = as.formula(
+      paste0(
+        response,
+        " ~ I(SampleSize / (SampleSize + 1)) * Type + Exploratory + (1 | Plot)"
+      )
+    ),
+    "Linear" = as.formula(
+      paste0(
+        response,
+        " ~ SampleSize * Type + Exploratory + (1 | Plot)"
+      )
     )
   )
 
-  models <- lapply(trans, function(t) {
-    glmmTMB(fml(t), data = dat, family = Gamma(link = "log"))
-  })
+  models <- lapply(
+    formulas,
+    function(f)
+      glmmTMB(
+        f,
+        data = effort_dat,
+        family = Gamma(link = "log")
+      )
+  )
 
-  aic_vals <- sapply(models, AIC)
+  aic <- sapply(models, AIC)
 
   data.frame(
-    Response    = response,
-    Predictor   = predictor,
-    Model       = names(trans),
-    AIC         = aic_vals,
-    delta_AIC   = aic_vals - min(aic_vals),
-    row.names   = NULL
+    Response = response,
+    Predictor = "Sampling effort",
+    Model = names(models),
+    AIC = aic,
+    DeltaAIC = aic - min(aic),
+    row.names = NULL
   ) %>%
-    arrange(delta_AIC)
+    arrange(DeltaAIC)
 }
 
-# -- 3. Prepare plot-level means
 
-## Per SampleSize
-df_N <- sampling_data %>%
-  group_by(Plot, Type, SampleSize) %>%
+# Spatial extent
+
+extent_dat <- raw %>%
+  filter(
+    SampleSize > 1,
+    MaxExtent > 0,
+    Gamma_q0 > 0,
+    GammaRare_q0 > 0
+  ) %>%
+  group_by(
+    Plot, Type, Exploratory,
+    SampleSize, CoreIndices, MaxExtent
+  ) %>%
   summarise(
-    Gamma_q0     = mean(Gamma_q0,     na.rm = TRUE),
+    Gamma_q0 = mean(Gamma_q0, na.rm = TRUE),
     GammaRare_q0 = mean(GammaRare_q0, na.rm = TRUE),
     .groups = "drop"
+  ) %>%
+  mutate(
+    SampleSizeF = factor(SampleSize)
   )
 
-## Per Extent
-df_E <- sampling_data %>%
-  group_by(Plot, Type, Extent) %>%
-  summarise(
-    Gamma_q0     = mean(Gamma_q0,     na.rm = TRUE),
-    GammaRare_q0 = mean(GammaRare_q0, na.rm = TRUE),
-    .groups = "drop"
+compare_extent <- function(response) {
+
+  formulas <- list(
+    "Log-linear" = as.formula(
+      paste0(
+        response,
+        " ~ log(MaxExtent) * Type + SampleSizeF + Exploratory + (1 | Plot)"
+      )
+    ),
+    "Square root" = as.formula(
+      paste0(
+        response,
+        " ~ sqrt(MaxExtent) * Type + SampleSizeF + Exploratory + (1 | Plot)"
+      )
+    ),
+    "Asymptotic" = as.formula(
+      paste0(
+        response,
+        " ~ I(MaxExtent / (MaxExtent + 1)) * Type + SampleSizeF + Exploratory + (1 | Plot)"
+      )
+    ),
+    "Linear" = as.formula(
+      paste0(
+        response,
+        " ~ MaxExtent * Type + SampleSizeF + Exploratory + (1 | Plot)"
+      )
+    )
   )
 
-# -- 4. Run all saturation tests
-results <- bind_rows(
-  run_saturation_test(df_N, "Gamma_q0",     "SampleSize"),
-  run_saturation_test(df_N, "GammaRare_q0", "SampleSize"),
-  run_saturation_test(df_E, "Gamma_q0",     "Extent"),
-  run_saturation_test(df_E, "GammaRare_q0", "Extent")
+  models <- lapply(
+    formulas,
+    function(f)
+      glmmTMB(
+        f,
+        data = extent_dat,
+        family = Gamma(link = "log")
+      )
+  )
+
+  aic <- sapply(models, AIC)
+
+  data.frame(
+    Response = response,
+    Predictor = "Spatial extent",
+    Model = names(models),
+    AIC = aic,
+    DeltaAIC = aic - min(aic),
+    row.names = NULL
+  ) %>%
+    arrange(DeltaAIC)
+}
+
+
+# Table S6
+
+table_s6 <- bind_rows(
+  compare_effort("Gamma_q0"),
+  compare_effort("GammaRare_q0"),
+  compare_extent("Gamma_q0"),
+  compare_extent("GammaRare_q0")
 )
 
-print(results)
-
-wb <- createWorkbook()
-addWorksheet(wb, "Saturation_AIC")
-writeData(wb, "Saturation_AIC", results)
-saveWorkbook(wb, "Saturation_model_comparison.xlsx", overwrite = TRUE)
+write.xlsx(
+  table_s6,
+  "TableS6_saturation_model_comparison.xlsx",
+  overwrite = TRUE
+)
