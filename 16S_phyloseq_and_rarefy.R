@@ -1,139 +1,140 @@
 # 16S phyloseq object construction and rarefaction
 #
-# This script prepares the 16S phyloseq object used for downstream analyses.
+# This script prepares the 16S phyloseq objects used for downstream analyses.
 #
 # Main steps:
-# - Load ASV table and taxonomy table from the DADA2 pipeline
+# - Load ASV and taxonomy tables from the DADA2 pipeline
+# - Retain bacterial ASVs and remove chloroplast and mitochondrial sequences
 # - Combine ASV table, taxonomy table, and metadata into a phyloseq object
-# - Export OTU abundance, taxonomy, and metadata tables
 # - Summarize sequencing depth per sample
-# - Rarefy the phyloseq object to the selected sequencing depth
+# - Rarefy samples to 8,000 reads
+# - Save unrarefied and rarefied phyloseq objects
+
 
 library(phyloseq)
-library(openxlsx)
 
-# Rarefaction depth selected after inspecting sequencing depth distributions.
 sample_depth <- 8000
 seed <- 1
 
+dada2_path <- "results/dada2_16S"
+out_path <- "results/phyloseq_16S"
+
+dir.create(out_path, showWarnings = FALSE, recursive = TRUE)
+
+
 # Load DADA2 outputs
 
-seqtab_nochim <- readRDS("seqtab16S_paired.nochim.rds")
-taxa <- readRDS("taxtable16S_paired.rds")
+seqtab <- readRDS(file.path(dada2_path, "seqtab16S.nochim.rds"))
+taxa <- readRDS(file.path(dada2_path, "taxtable16S.rds"))
+
+
+# Keep bacterial ASVs and remove organelles
+
+tax <- as.data.frame(taxa, stringsAsFactors = FALSE)
+
+tax_string <- apply(
+  tax, 1,
+  function(x) paste(x[!is.na(x)], collapse = ";")
+)
+
+chloroplast <- grepl("chloroplast", tax_string, ignore.case = TRUE)
+mitochondria <- grepl("mitochond", tax_string, ignore.case = TRUE)
+
+keep <- !is.na(tax$Kingdom) &
+  tax$Kingdom == "Bacteria" &
+  !chloroplast &
+  !mitochondria
+
+seqtab <- seqtab[, keep, drop = FALSE]
+taxa <- taxa[colnames(seqtab), , drop = FALSE]
+
 
 # Load metadata
 
 meta <- read.table(
-  "meta16sf.txt",
+  "data/meta_16S_Bexis.txt",
   header = TRUE,
   row.names = 1,
   sep = "\t",
-  stringsAsFactors = FALSE
+  stringsAsFactors = FALSE,
+  check.names = FALSE
 )
 
-# Keep only samples shared between ASV table and metadata
+meta[] <- lapply(
+  meta,
+  function(x) if (is.character(x)) trimws(x) else x
+)
 
-common_samples <- intersect(rownames(seqtab_nochim), rownames(meta))
 
-seqtab_nochim <- seqtab_nochim[common_samples, , drop = FALSE]
+
+# Keep samples shared between ASV table and metadata
+
+common_samples <- intersect(rownames(meta), rownames(seqtab))
+
+seqtab <- seqtab[common_samples, , drop = FALSE]
 meta <- meta[common_samples, , drop = FALSE]
 
-# Prepare taxonomy table
 
-taxa <- tax_table(taxa)
-taxa_names(taxa) <- colnames(seqtab_nochim)
+# Remove ASVs absent from the matched samples
 
-# Create phyloseq object
+present_asvs <- colSums(seqtab) > 0
+
+seqtab <- seqtab[, present_asvs, drop = FALSE]
+taxa <- taxa[colnames(seqtab), , drop = FALSE]
+
+
+# Create unrarefied phyloseq object
 
 physeq16S <- phyloseq(
-  otu_table(seqtab_nochim, taxa_are_rows = FALSE),
+  otu_table(seqtab, taxa_are_rows = FALSE),
   sample_data(meta),
-  tax_table(taxa)
+  tax_table(as.matrix(taxa))
 )
 
-print(physeq16S)
-
-# Export OTU table, taxonomy table, and metadata
-
-otu_export <- as.data.frame(t(otu_table(physeq16S)))
-tax_export <- as.data.frame(tax_table(physeq16S))
-
-write.table(
-  otu_export,
-  file = "asv_abundance.txt",
-  sep = "\t",
-  quote = FALSE,
-  row.names = TRUE,
-  col.names = NA
+saveRDS(
+  physeq16S,
+  file.path(out_path, "physeq16S_bacteria_unrarefied.rds")
 )
 
-write.table(
-  tax_export,
-  file = "taxonomy.txt",
-  sep = "\t",
-  quote = FALSE,
-  row.names = TRUE,
-  col.names = NA
-)
 
-wb <- createWorkbook()
-
-addWorksheet(wb, "Metadata")
-writeData(wb, "Metadata", meta, rowNames = TRUE)
-
-addWorksheet(wb, "OTU_Abundance")
-writeData(wb, "OTU_Abundance", otu_export, rowNames = TRUE)
-
-addWorksheet(wb, "Taxonomy")
-writeData(wb, "Taxonomy", tax_export, rowNames = TRUE)
-
-saveWorkbook(
-  wb,
-  "soil_bacteria_dataset.xlsx",
-  overwrite = TRUE
-)
-
-# Save unrarefied phyloseq object
-
-saveRDS(physeq16S, "physeq16S.rds")
-
-# Sequencing depth summary before rarefaction
+# Summarize sequencing depth
 
 read_counts <- sort(sample_sums(physeq16S))
 
 write.table(
   read_counts,
-  file = "sample_read_counts_sorted.txt",
+  file.path(out_path, "sample_read_counts_sorted.txt"),
   sep = "\t",
   quote = FALSE,
   col.names = FALSE
 )
 
-print(summary(sample_sums(physeq16S)))
 
-# Rarefy phyloseq object
+# Rarefy to 8,000 reads
+
+physeq_8000 <- prune_samples(
+  sample_sums(physeq16S) >= sample_depth,
+  physeq16S
+)
 
 set.seed(seed)
 
 rarefied16S <- rarefy_even_depth(
-  physeq16S,
+  physeq_8000,
   sample.size = sample_depth,
-  rngseed = seed
+  rngseed = seed,
+  replace = FALSE
 )
 
-# Check samples removed during rarefaction
-
-removed_samples <- setdiff(
-  sample_names(physeq16S),
-  sample_names(rarefied16S)
+rarefied16S <- prune_taxa(
+  taxa_sums(rarefied16S) > 0,
+  rarefied16S
 )
 
-if (length(removed_samples) > 0) {
-  print(removed_samples)
-}
 
-print(summary(sample_sums(rarefied16S)))
+# Save rarefied phyloseq object
 
-# Save rarefied phyloseq object for downstream sampling-design analyses
-
-saveRDS(rarefied16S, "rarefied16S.rds")
+saveRDS(
+  rarefied16S,
+  file.path(out_path, "physeq16S_rarefied_8000.rds")
+)
