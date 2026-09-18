@@ -1,9 +1,14 @@
-
-# 16S plot-wise spatial subsampling and composite-sample comparison
+# 16S plot-wise spatial subsampling analysis
 #
-# This script analyzes rarefied 16S data for:
-# 1. Plot-wise subsampling of individual samples across sampling effort and spatial extent
-# 2. Plot-level comparison of diversity metrics between individual and composite samples
+# This script analyzes rarefied 16S data across sampling effort and spatial extent.
+#
+# Main steps:
+# - Subsample 1-14 individual soil cores per plot
+# - Calculate Hill diversity (q0, q1, q2) and sample coverage
+# - Standardize plot-level diversity to a fixed sequencing depth of 8,000 reads
+# - Calculate maximum and mean pairwise spatial distances
+# - Repeat random subsampling 100 times per sampling effort
+# - Save sampling-design metrics for downstream analyses
 
 
 library(phyloseq)
@@ -12,365 +17,244 @@ library(openxlsx)
 library(betaC)
 library(vegan)
 
+ps <- readRDS("physeq16S_RAREFIED_8000.rds")
+
 sizes <- 1:14
 nrep <- 100
 sample_depth <- 8000
 seed <- 1
 
-nrep_plotlevel <- 1
+
+# Hill diversity functions
+
+hill_q1 <- function(v) {
+  v <- as.numeric(v)
+  v <- v[v > 0]
+  p <- v / sum(v)
+  exp(-sum(p * log(p)))
+}
+
+hill_q2 <- function(v) {
+  v <- as.numeric(v)
+  v <- v[v > 0]
+  p <- v / sum(v)
+  1 / sum(p^2)
+}
+
+coverage_q0 <- function(v) {
+  x <- as.numeric(betaC::coverage(as.numeric(v)))
+  if (is.finite(x)) x else NA_real_
+}
+
+
+# Metadata
+
+meta <- data.frame(
+  sample_data(ps),
+  stringsAsFactors = FALSE
+)
+
+meta$sfull <- rownames(meta)
+
+meta_N <- meta[
+  meta$Pooling == "N" & !is.na(meta$Pooling),
+  ,
+  drop = FALSE
+]
+
+meta_N$core_index <- as.integer(
+  sub(".*_([0-9]+)$", "\\1", meta_N$Sample_ID)
+)
+
 
 # Fixed sampling coordinates
-# Forest plots use 6 m spacing; grassland plots use 3 m spacing
 
+# Forest: 6 m spacing
 xy_f <- data.frame(
-  Sample = 1:14,
   X = c(rep(0, 7), seq(-18, 18, by = 6)),
   Y = c(seq(-18, 18, by = 6), rep(0, 7))
 )
 
+# Grassland: 3 m spacing
 xy_g <- data.frame(
-  Sample = 1:14,
   X = c(rep(0, 7), seq(-9, 9, by = 3)),
   Y = c(seq(-9, 9, by = 3), rep(0, 7))
 )
 
-# Function to return NA for non-finite numeric values
 
-safe_num <- function(x) {
-  x <- as.numeric(x)
-  if (!is.finite(x)) NA_real_ else x
-}
+# Plots to analyze
 
-# Calculate plot-level richness and sample coverage
+plots_ok <- meta_N %>%
+  select(VIP_Plot, Type, Exploratory) %>%
+  distinct() %>%
+  filter(!is.na(VIP_Plot))
 
-calc_richness_coverage <- function(comm) {
-  gamma <- colSums(comm)
-  
-  Alpha_q0 <- mean(rowSums(comm > 0))
-  Gamma_q0 <- sum(gamma > 0)
-  Beta_q0 <- ifelse(Alpha_q0 > 0, Gamma_q0 / Alpha_q0, NA_real_)
-  
-  Alpha_SC_q0 <- mean(
-    apply(comm, 1, function(v) safe_num(betaC::coverage(as.numeric(v)))),
-    na.rm = TRUE
-  )
-  Alpha_SC_q0 <- safe_num(Alpha_SC_q0)
-  
-  Gamma_SC_q0 <- safe_num(betaC::coverage(as.numeric(gamma)))
-  
-  list(
-    Alpha_q0 = Alpha_q0,
-    Gamma_q0 = Gamma_q0,
-    Beta_q0 = Beta_q0,
-    Alpha_SC_q0 = Alpha_SC_q0,
-    Gamma_SC_q0 = Gamma_SC_q0,
-    gamma = gamma
-  )
-}
 
-# Calculate standardized plot-level richness and coverage at fixed read depth
-
-calc_rarefied_gamma <- function(gamma, sample_depth) {
-  if (sum(gamma) < sample_depth) {
-    return(list(
-      GammaRare_q0 = NA_real_,
-      GammaRare_SC_q0 = NA_real_
-    ))
-  }
-  
-  gamma_rare <- as.numeric(
-    vegan::rrarefy(matrix(gamma, nrow = 1), sample = sample_depth)
-  )
-  
-  GammaRare_q0 <- sum(gamma_rare > 0)
-  GammaRare_SC_q0 <- safe_num(betaC::coverage(as.numeric(gamma_rare)))
-  
-  list(
-    GammaRare_q0 = GammaRare_q0,
-    GammaRare_SC_q0 = GammaRare_SC_q0
-  )
-}
-
-# Calculate spatial extent as the sum of pairwise distances among selected samples
-
-calculate_extent <- function(sample_names_subset, map, xyset) {
-  plot_names_subset <- map$Plot_Name[match(sample_names_subset, map$sfull)]
-  
-  coords_index <- suppressWarnings(
-    as.integer(sub(".*_(\\d+)$", "\\1", plot_names_subset))
-  )
-  
-  coords_index <- coords_index[
-    coords_index >= 1 & coords_index <= nrow(xyset)
-  ]
-  
-  if (length(coords_index) < 2) {
-    return(0)
-  }
-  
-  coords_used <- xyset[coords_index, c("X", "Y"), drop = FALSE]
-  coords_used <- coords_used[complete.cases(coords_used), , drop = FALSE]
-  
-  if (nrow(coords_used) < 2) {
-    return(0)
-  }
-  
-  sum(dist(coords_used))
-}
-
-# Read input data.
-
-ps <- readRDS("rarefied16S.rds")
-
-meta <- read.table(
-  "meta16S.txt",
-  header = TRUE,
-  sep = "\t",
-  stringsAsFactors = FALSE
-)
-
-# Map phyloseq sample names to metadata using Sample_Number
-
-map <- data.frame(
-  sfull = sample_names(ps),
-  snum = suppressWarnings(as.integer(sub("_.*", "", sample_names(ps)))),
-  stringsAsFactors = FALSE
-)
-
-map <- merge(
-  map,
-  meta[, c(
-    "Sample_Number",
-    "Plot_Name",
-    "VIP_Plot",
-    "Pooling",
-    "Type",
-    "Exploratory"
-  )],
-  by.x = "snum",
-  by.y = "Sample_Number",
-  all.x = TRUE
-)
-
-# Convert phyloseq OTU table to samples x taxa matrix
+# Convert phyloseq OTU table to samples x ASVs matrix
 
 otu <- as(otu_table(ps), "matrix")
-if (taxa_are_rows(ps)) otu <- t(otu)
+
+if (taxa_are_rows(ps)) {
+  otu <- t(otu)
+}
+
+
+# Random subsampling across sampling effort
 
 set.seed(seed)
 
-# Part 1: Individual sample-based sampling curves -------------------------
+out <- vector(
+  "list",
+  nrow(plots_ok) * length(sizes) * nrep
+)
 
-plots_ok <- unique(meta[meta$Pooling == "N", c("VIP_Plot", "Type", "Exploratory")])
-plots_ok <- plots_ok[!is.na(plots_ok$VIP_Plot), , drop = FALSE]
-
-out <- list()
+idx <- 0L
 
 for (i in seq_len(nrow(plots_ok))) {
-  
+
   pid <- plots_ok$VIP_Plot[i]
   ptype <- plots_ok$Type[i]
   expl <- plots_ok$Exploratory[i]
+
   xyset <- if (ptype == "Forest") xy_f else xy_g
-  
-  matched <- map$sfull[
-    !is.na(map$VIP_Plot) &
-      map$VIP_Plot == pid &
-      map$Pooling == "N"
-  ]
-  
-  matched <- unique(matched)
-  if (length(matched) == 0) next
-  
+
+  matched <- rownames(meta_N)[meta_N$VIP_Plot == pid]
   otu_plot <- otu[matched, , drop = FALSE]
-  
+
   for (k in sizes) {
-    if (k > nrow(otu_plot)) next
-    
+
     for (r in seq_len(nrep)) {
-      
+
       sub_samp <- sample(rownames(otu_plot), k)
       comm <- otu_plot[sub_samp, , drop = FALSE]
-      
-      metrics <- calc_richness_coverage(comm)
-      rare_metrics <- calc_rarefied_gamma(metrics$gamma, sample_depth)
-      
-      Extent <- calculate_extent(
-        sample_names_subset = sub_samp,
-        map = map,
-        xyset = xyset
+
+      gamma <- colSums(comm)
+
+
+      # q0: observed richness
+
+      Alpha_q0 <- mean(rowSums(comm > 0))
+      Gamma_q0 <- sum(gamma > 0)
+      Beta_q0 <- Gamma_q0 / Alpha_q0
+
+
+      # q1: exponential Shannon
+
+      alpha_q1_values <- apply(comm, 1, hill_q1)
+      Alpha_q1 <- exp(mean(log(alpha_q1_values)))
+      Gamma_q1 <- hill_q1(gamma)
+      Beta_q1 <- Gamma_q1 / Alpha_q1
+
+
+      # q2: inverse Simpson
+
+      row_totals <- rowSums(comm)
+      p_comm <- sweep(comm, 1, row_totals, "/")
+
+      Alpha_q2 <- 1 / mean(rowSums(p_comm^2))
+      Gamma_q2 <- hill_q2(gamma)
+      Beta_q2 <- Gamma_q2 / Alpha_q2
+
+
+      # Sample coverage
+
+      Alpha_SC_q0 <- mean(
+        apply(comm, 1, coverage_q0),
+        na.rm = TRUE
       )
-      
-      out[[length(out) + 1]] <- data.frame(
+
+      Gamma_SC_q0 <- coverage_q0(gamma)
+
+
+      # Standardize pooled community to 8,000 reads
+
+      gamma_rare <- as.numeric(
+        vegan::rrarefy(
+          matrix(gamma, nrow = 1),
+          sample = sample_depth
+        )
+      )
+
+      GammaRare_q0 <- sum(gamma_rare > 0)
+      GammaRare_q1 <- hill_q1(gamma_rare)
+      GammaRare_q2 <- hill_q2(gamma_rare)
+      GammaRare_SC_q0 <- coverage_q0(gamma_rare)
+
+
+      # Spatial extent
+
+      coords_index <- meta_N$core_index[
+        match(sub_samp, rownames(meta_N))
+      ]
+
+      if (length(coords_index) == 1) {
+
+        MaxExtent <- 0
+        MeanPairwiseDistance <- 0
+
+      } else {
+
+        coords_used <- xyset[
+          coords_index,
+          c("X", "Y"),
+          drop = FALSE
+        ]
+
+        pairwise_distances <- as.numeric(dist(coords_used))
+
+        MaxExtent <- max(pairwise_distances)
+        MeanPairwiseDistance <- mean(pairwise_distances)
+      }
+
+
+      # Store results
+
+      idx <- idx + 1L
+
+      out[[idx]] <- data.frame(
         Plot = pid,
         Type = ptype,
         Exploratory = expl,
         SampleSize = k,
         Replicate = r,
-        Extent = Extent,
-        
-        Alpha_q0 = metrics$Alpha_q0,
-        Gamma_q0 = metrics$Gamma_q0,
-        Beta_q0 = metrics$Beta_q0,
-        
-        Alpha_SC_q0 = metrics$Alpha_SC_q0,
-        Gamma_SC_q0 = metrics$Gamma_SC_q0,
-        
+        CoreIndices = paste(sort(coords_index), collapse = ","),
+        Extent = MaxExtent,
+        MaxExtent_m = MaxExtent,
+        MeanPairwiseDistance_m = MeanPairwiseDistance,
+        Alpha_q0 = Alpha_q0,
+        Alpha_q1 = Alpha_q1,
+        Alpha_q2 = Alpha_q2,
+        Gamma_q0 = Gamma_q0,
+        Gamma_q1 = Gamma_q1,
+        Gamma_q2 = Gamma_q2,
+        Beta_q0 = Beta_q0,
+        Beta_q1 = Beta_q1,
+        Beta_q2 = Beta_q2,
+        Alpha_SC_q0 = Alpha_SC_q0,
+        Gamma_SC_q0 = Gamma_SC_q0,
         rare_depth = sample_depth,
-        GammaRare_q0 = rare_metrics$GammaRare_q0,
-        GammaRare_SC_q0 = rare_metrics$GammaRare_SC_q0,
-        
+        GammaRare_q0 = GammaRare_q0,
+        GammaRare_q1 = GammaRare_q1,
+        GammaRare_q2 = GammaRare_q2,
+        GammaRare_SC_q0 = GammaRare_SC_q0,
         stringsAsFactors = FALSE
       )
     }
   }
 }
 
-final_sampling <- dplyr::bind_rows(out)
+
+# Combine and save results
+
+final_sampling <- bind_rows(out)
+
+saveRDS(
+  final_sampling,
+  "spatial_subsampling.rds"
+)
 
 write.xlsx(
   final_sampling,
-  "16S_sampling_curves_individual.xlsx",
-  rowNames = FALSE
-)
-
-# Part 2: Plot-level individual vs composite sample comparison ------------
-
-# Individual metrics are calculated using all available individual samples
-# per plot, up to a maximum of 14
-# Composite metrics are calculated from one composite sample per plot
-
-# Identify composite samples from metadata
-
-composite_map <- map %>%
-  dplyr::filter(Pooling == "P") %>%
-  dplyr::select(
-    composite_sample_name = sfull,
-    VIP_Plot,
-    Exploratory,
-    Type
-  ) %>%
-  dplyr::filter(
-    !is.na(composite_sample_name),
-    !is.na(VIP_Plot),
-    !is.na(Type)
-  ) %>%
-  dplyr::distinct()
-
-plots_composite <- composite_map %>%
-  dplyr::select(VIP_Plot, Type, Exploratory) %>%
-  dplyr::distinct()
-
-composite_results <- list()
-
-for (i in seq_len(nrow(plots_composite))) {
-  
-  pid <- plots_composite$VIP_Plot[i]
-  ptype <- plots_composite$Type[i]
-  expl <- plots_composite$Exploratory[i]
-  xyset <- if (ptype == "Forest") xy_f else xy_g
-  
-  individual_samples <- map$sfull[
-    !is.na(map$VIP_Plot) &
-      map$VIP_Plot == pid &
-      map$Pooling == "N"
-  ]
-  
-  individual_samples <- unique(individual_samples[!is.na(individual_samples)])
-  
-  n_individual_samples <- length(individual_samples)
-  k_individual_used <- min(14, n_individual_samples)
-  
-  Alpha_q0_ind <- NA_real_
-  Gamma_q0_ind <- NA_real_
-  Alpha_SC_q0_ind <- NA_real_
-  Gamma_SC_q0_ind <- NA_real_
-  
-  if (k_individual_used >= 2) {
-    
-    otu_plot <- otu[individual_samples, , drop = FALSE]
-    
-    alpha_values <- numeric(nrep_plotlevel)
-    gamma_values <- numeric(nrep_plotlevel)
-    alpha_sc_values <- numeric(nrep_plotlevel)
-    gamma_sc_values <- numeric(nrep_plotlevel)
-    
-    for (r in seq_len(nrep_plotlevel)) {
-      
-      selected_samples <- sample(rownames(otu_plot), k_individual_used)
-      comm <- otu_plot[selected_samples, , drop = FALSE]
-      
-      metrics <- calc_richness_coverage(comm)
-      
-      alpha_values[r] <- metrics$Alpha_q0
-      gamma_values[r] <- metrics$Gamma_q0
-      alpha_sc_values[r] <- metrics$Alpha_SC_q0
-      gamma_sc_values[r] <- metrics$Gamma_SC_q0
-    }
-    
-    Alpha_q0_ind <- safe_num(mean(alpha_values, na.rm = TRUE))
-    Gamma_q0_ind <- safe_num(mean(gamma_values, na.rm = TRUE))
-    Alpha_SC_q0_ind <- safe_num(mean(alpha_sc_values, na.rm = TRUE))
-    Gamma_SC_q0_ind <- safe_num(mean(gamma_sc_values, na.rm = TRUE))
-  }
-  
-  composite_row <- composite_map[
-    composite_map$VIP_Plot == pid,
-    ,
-    drop = FALSE
-  ]
-  
-  composite_row <- composite_row[1, , drop = FALSE]
-  composite_sample <- composite_row$composite_sample_name
-  
-  Alpha_q0_composite <- NA_real_
-  Gamma_q0_composite <- NA_real_
-  Alpha_SC_q0_composite <- NA_real_
-  Gamma_SC_q0_composite <- NA_real_
-  
-  if (!is.na(composite_sample) && composite_sample %in% rownames(otu)) {
-    
-    comm_composite <- otu[composite_sample, , drop = FALSE]
-    
-    Alpha_q0_composite <- sum(comm_composite[1, ] > 0)
-    Gamma_q0_composite <- Alpha_q0_composite
-    
-    composite_coverage <- safe_num(
-      betaC::coverage(as.numeric(comm_composite[1, ]))
-    )
-    
-    Alpha_SC_q0_composite <- composite_coverage
-    Gamma_SC_q0_composite <- composite_coverage
-  }
-  
-  composite_results[[length(composite_results) + 1]] <- data.frame(
-    Plot = pid,
-    Type = ptype,
-    Exploratory = expl,
-
-    n_individual_samples = n_individual_samples,
-    k_individual_used = k_individual_used,
-    
-    Alpha_q0_ind = Alpha_q0_ind,
-    Gamma_q0_ind = Gamma_q0_ind,
-    Alpha_SC_q0_ind = Alpha_SC_q0_ind,
-    Gamma_SC_q0_ind = Gamma_SC_q0_ind,
-    
-    Alpha_q0_composite = Alpha_q0_composite,
-    Gamma_q0_composite = Gamma_q0_composite,
-    Alpha_SC_q0_composite = Alpha_SC_q0_composite,
-    Gamma_SC_q0_composite = Gamma_SC_q0_composite,
-    
-    composite_sample_name = composite_sample,
-    
-    stringsAsFactors = FALSE
-  )
-}
-
-final_composite <- dplyr::bind_rows(composite_results)
-
-write.xlsx(
-  final_composite,
-  "16S_plot_level_individual_vs_composite.xlsx",
+  "spatial_subsampling.xlsx",
   rowNames = FALSE
 )
