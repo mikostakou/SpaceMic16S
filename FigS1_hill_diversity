@@ -19,7 +19,7 @@ metrics <- c(
   "Gamma_q2", "GammaRare_q2"
 )
 
-raw <- readRDS("Sampling_Engel_100reps_updated.rds") %>%
+raw <- readRDS("spatial_subsampling.rds") %>%
   mutate(
     Plot = factor(Plot),
     Type = factor(trimws(Type), levels = c("Grassland", "Forest")),
