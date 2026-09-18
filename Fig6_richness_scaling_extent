@@ -1,136 +1,318 @@
-# Figure 6: Plot-level richness vs Sample-level richness
-#           across spatial extent range (panels by Type x Extent)
+# Figure 6: Sample-level vs observed plot-level richness across spatial extent
 #
-# Model: Gamma GLMM, log-link: Gamma_q0 ~ log(Alpha_q0) * Type + (1|Plot)
-#        fit separately per extent range
+# Main steps:
+# - Average repeated occurrences of the same core subset
+# - Group observations into spatial extent classes
+# - Average within Plot x SampleSize x ExtentBin
+# - Fit Gamma GLMMs separately for each extent class
+# - Generate proportionally weighted marginal predictions
+# - Save Figure 6 and statistical summaries
 
 library(dplyr)
-library(tidyr)
 library(ggplot2)
 library(glmmTMB)
-library(ggnewscale)
-library(purrr)
-library(tibble)
+library(emmeans)
 library(openxlsx)
 
-setwd("path/to/your/16S/data")
+options(contrasts = c("contr.sum", "contr.poly"))
 
-# -- 1. Load data
-sampling_data <- openxlsx::read.xlsx("16S_sampling_curves_individual.xlsx")
-
-# -- 2. Plot settings
-color_scheme_points <- c("Forest" = "forestgreen", "Grassland" = "yellowgreen")
-color_scheme_lines  <- c("Forest" = "darkgreen",   "Grassland" = "olivedrab")
-type_levels         <- c("Forest", "Grassland")
-extent_bins         <- c("0–75 m", "100–300 m", "600–1000 m")
-
-# -- 3. Prepare data
-df_sub <- sampling_data %>%
+raw <- readRDS("Sampling_Engel_100reps_updated.rds") %>%
   mutate(
-    Type = factor(Type, levels = type_levels),
-    ExtentBin = case_when(
-      Extent >=   0 & Extent <=   75  ~ "0–75 m",
-      Extent >= 100 & Extent <=  300  ~ "100–300 m",
-      Extent >= 600 & Extent <= 1000  ~ "600–1000 m",
-      TRUE ~ NA_character_
+    Type = factor(trimws(Type), levels = c("Grassland", "Forest")),
+    Plot = factor(Plot),
+    Exploratory = factor(Exploratory),
+    SampleSize = as.integer(SampleSize)
+  )
+
+extent_bins <- c("0–12 m", "12–18 m", "18–36 m")
+
+
+# Average repeated occurrences of the same core subset
+
+base <- raw %>%
+  filter(
+    SampleSize > 1,
+    MaxExtent_m > 0,
+    Alpha_q0 > 0,
+    Gamma_q0 > 0
+  ) %>%
+  group_by(
+    Plot, Type, Exploratory, SampleSize,
+    CoreIndices, MaxExtent_m
+  ) %>%
+  summarise(
+    Alpha_q0 = mean(Alpha_q0, na.rm = TRUE),
+    Gamma_q0 = mean(Gamma_q0, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+
+# Spatial extent classes
+
+dat <- base %>%
+  mutate(
+    ExtentBin = cut(
+      MaxExtent_m,
+      breaks = c(0, 12, 18, 36),
+      labels = extent_bins,
+      include.lowest = TRUE
     )
   ) %>%
   filter(!is.na(ExtentBin)) %>%
-  mutate(ExtentBin = factor(ExtentBin, levels = extent_bins)) %>%
-  drop_na(Alpha_q0, Gamma_q0, Type, Plot)
+  group_by(
+    Plot, Type, Exploratory,
+    SampleSize, ExtentBin
+  ) %>%
+  summarise(
+    Alpha_q0 = mean(Alpha_q0, na.rm = TRUE),
+    Gamma_q0 = mean(Gamma_q0, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    ExtentBin = factor(ExtentBin, levels = extent_bins),
+    logAlpha = log(Alpha_q0),
+    SampleSizeF = factor(SampleSize)
+  )
 
-# -- 4. Fit models and build prediction grids per extent range
 
-## Helper: prediction grid clipped to observed Alpha range per Type
-get_preds_one_bin <- function(dat, extent_label) {
-  dat <- dat %>% mutate(logAlpha = log(Alpha_q0))
+# Models and predictions by extent class
 
-  m <- glmmTMB(
-    Gamma_q0 ~ logAlpha * Type + (1 | Plot),
-    data   = dat,
+run_bin <- function(d, bin) {
+
+  d <- droplevels(d)
+  two_types <- nlevels(d$Type) > 1
+
+  form <- if (two_types) {
+    Gamma_q0 ~ logAlpha * Type + SampleSizeF + Exploratory + (1 | Plot)
+  } else {
+    Gamma_q0 ~ logAlpha + SampleSizeF + Exploratory + (1 | Plot)
+  }
+
+  model <- glmmTMB(
+    form,
+    data = d,
     family = Gamma(link = "log")
   )
 
-  ranges <- dat %>%
+  ranges <- d %>%
     group_by(Type) %>%
     summarise(
-      a_min = max(quantile(Alpha_q0, 0.01, na.rm = TRUE), min(Alpha_q0, na.rm = TRUE)),
-      a_max = min(quantile(Alpha_q0, 0.99, na.rm = TRUE), max(Alpha_q0, na.rm = TRUE)),
+      lo = quantile(Alpha_q0, 0.01),
+      hi = quantile(Alpha_q0, 0.99),
       .groups = "drop"
+    )
+
+  x <- seq(
+    min(ranges$lo),
+    max(ranges$hi),
+    length.out = 120
+  )
+
+  if (two_types) {
+
+    pred <- emmeans(
+      model,
+      ~ Type | logAlpha,
+      at = list(logAlpha = log(x)),
+      nuisance = c("SampleSizeF", "Exploratory"),
+      wt.nuis = "proportional",
+      type = "response"
     ) %>%
-    mutate(
-      a_min = ifelse(a_min == a_max, pmax(1e-6, a_min * 0.99), a_min),
-      a_max = ifelse(a_min == a_max, a_max * 1.01, a_max)
+      summary(infer = TRUE) %>%
+      as.data.frame()
+
+    trends <- emtrends(
+      model,
+      ~ Type,
+      var = "logAlpha",
+      nuisance = c("SampleSizeF", "Exploratory")
     )
 
-  grid <- pmap_dfr(
-    list(ranges$Type, ranges$a_min, ranges$a_max),
-    function(tp, lo, hi) {
-      tibble(
-        Type     = factor(tp, levels = type_levels),
-        Alpha_q0 = seq(lo, hi, length.out = 200)
-      )
-    }
-  ) %>%
-    mutate(
-      logAlpha  = log(Alpha_q0),
-      ExtentBin = factor(extent_label, levels = extent_bins)
+    contrast <- as.data.frame(
+      summary(pairs(trends), infer = TRUE)
     )
 
-  pr <- predict(m, newdata = grid, type = "link", se.fit = TRUE, re.form = NA)
-  grid$fit <- exp(pr$fit)
-  grid$lo  <- exp(pr$fit - 1.96 * pr$se.fit)
-  grid$hi  <- exp(pr$fit + 1.96 * pr$se.fit)
+  } else {
 
-  grid
+    pred <- emmeans(
+      model,
+      ~ logAlpha,
+      at = list(logAlpha = log(x)),
+      nuisance = c("SampleSizeF", "Exploratory"),
+      wt.nuis = "proportional",
+      type = "response"
+    ) %>%
+      summary(infer = TRUE) %>%
+      as.data.frame() %>%
+      mutate(Type = as.character(unique(d$Type)))
+
+    trends <- emtrends(
+      model,
+      ~ 1,
+      var = "logAlpha",
+      nuisance = c("SampleSizeF", "Exploratory")
+    )
+
+    contrast <- data.frame()
+  }
+
+  pred <- pred %>%
+    mutate(
+      Alpha_q0 = exp(logAlpha),
+      ExtentBin = bin
+    ) %>%
+    left_join(ranges, by = "Type") %>%
+    filter(Alpha_q0 >= lo, Alpha_q0 <= hi)
+
+  slopes <- as.data.frame(
+    summary(trends, infer = TRUE)
+  )
+
+  if (!two_types) {
+    slopes$Type <- as.character(unique(d$Type))
+  }
+
+  slopes <- slopes %>%
+    mutate(
+      ExtentBin = bin,
+      gain_per_doubling = exp(log(2) * logAlpha.trend)
+    )
+
+  if (nrow(contrast) > 0) {
+    contrast$ExtentBin <- bin
+  }
+
+  list(
+    model = model,
+    pred = pred,
+    slopes = slopes,
+    contrast = contrast
+  )
 }
 
-set.seed(1)
-pred_gamma <- bind_rows(
-  lapply(extent_bins, function(b) get_preds_one_bin(filter(df_sub, ExtentBin == b), b))
-) %>%
+res <- lapply(
+  extent_bins,
+  function(x) run_bin(filter(dat, ExtentBin == x), x)
+)
+
+pred <- bind_rows(lapply(res, `[[`, "pred")) %>%
   mutate(
-    Type      = factor(Type,      levels = type_levels),
+    Type = factor(Type, levels = c("Grassland", "Forest")),
     ExtentBin = factor(ExtentBin, levels = extent_bins)
   )
 
-# -- 5. Build figure
-p <- ggplot() +
+slopes <- bind_rows(lapply(res, `[[`, "slopes"))
+contrasts <- bind_rows(lapply(res, `[[`, "contrast"))
+
+
+# Save statistical summaries
+
+write.xlsx(
+  list(
+    Slopes = slopes,
+    Slope_contrasts = contrasts
+  ),
+  "Fig6_stats.xlsx",
+  overwrite = TRUE
+)
+
+
+# Figure 6
+
+point_cols <- c(
+  Grassland = "yellowgreen",
+  Forest = "forestgreen"
+)
+
+line_cols <- c(
+  Grassland = "olivedrab",
+  Forest = "darkgreen"
+)
+
+p <- ggplot(dat, aes(Alpha_q0, Gamma_q0)) +
+
   geom_point(
-    data = df_sub,
-    aes(x = Alpha_q0, y = Gamma_q0, colour = Type),
-    alpha = 0.05, size = 1
+    aes(colour = Type),
+    alpha = 0.3,
+    size = 1.2
   ) +
-  scale_colour_manual(values = color_scheme_points) +
-  ggnewscale::new_scale_colour() +
+
   geom_ribbon(
-    data = pred_gamma,
-    aes(x = Alpha_q0, ymin = lo, ymax = hi, fill = Type),
-    alpha = 0.18, colour = NA
+    data = pred,
+    aes(
+      x = Alpha_q0,
+      ymin = asymp.LCL,
+      ymax = asymp.UCL,
+      fill = Type
+    ),
+    inherit.aes = FALSE,
+    alpha = 0.3,
+    colour = NA
   ) +
-  scale_fill_manual(values = color_scheme_lines, guide = "none") +
+
   geom_line(
-    data = pred_gamma,
-    aes(x = Alpha_q0, y = fit, colour = Type),
-    linewidth = 1.2
+    data = filter(pred, Type == "Grassland"),
+    aes(Alpha_q0, response),
+    inherit.aes = FALSE,
+    colour = line_cols["Grassland"],
+    linewidth = 1.15
   ) +
-  scale_colour_manual(values = color_scheme_lines, guide = "none") +
-  facet_grid(Type ~ ExtentBin) +
-  labs(x = "Sample-level richness", y = "Plot-level richness") +
-  theme_bw() +
+
+  geom_line(
+    data = filter(pred, Type == "Forest"),
+    aes(Alpha_q0, response),
+    inherit.aes = FALSE,
+    colour = line_cols["Forest"],
+    linewidth = 1.15
+  ) +
+
+  facet_grid(Type ~ ExtentBin, drop = FALSE) +
+
+  scale_colour_manual(
+    values = point_cols,
+    guide = "none"
+  ) +
+
+  scale_fill_manual(
+    values = point_cols,
+    guide = "none"
+  ) +
+
+  labs(
+    x = "Sample-level richness",
+    y = "Observed plot-level richness"
+  ) +
+
+  theme_bw(base_size = 15) +
   theme(
-    legend.position    = "none",
-    axis.title.x       = element_text(size = 19),
-    axis.title.y       = element_text(size = 19),
-    axis.text          = element_text(size = 17),
-    strip.text         = element_text(size = 17, face = "bold"),
-    strip.text.y       = element_text(angle = -90),
-    strip.background.x = element_rect(fill = "grey92", color = "grey92"),
-    strip.background.y = element_rect(fill = "grey92", color = "grey92"),
-    panel.grid.major.x = element_line(color = "grey90", linewidth = 0.3),
-    panel.grid.minor   = element_blank()
+    axis.title = element_text(size = 18),
+    axis.text = element_text(size = 14),
+    strip.text = element_text(size = 15, face = "bold"),
+    strip.text.y = element_text(angle = -90),
+    strip.background = element_rect(
+      fill = "grey92",
+      colour = "black"
+    ),
+    panel.grid.minor = element_blank()
   )
 
-print(p)
-ggsave("Fig6_richness_scaling_extent.png", p,
-       width = 11, height = 6.8, dpi = 600, bg = "white")
+
+# Save Figure 6
+
+ggsave(
+  "Fig6.png",
+  p,
+  width = 11,
+  height = 6.8,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  "Fig6.pdf",
+  p,
+  width = 11,
+  height = 6.8,
+  device = cairo_pdf,
+  bg = "white"
+)
