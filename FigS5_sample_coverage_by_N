@@ -1,4 +1,117 @@
-# Figure S5: Sample coverage across sampling effort
+# Figure S5: Plot-level sample coverage across sampling effort
+
+library(dplyr)
+library(ggplot2)
+
+raw <- readRDS("spatial_subsampling.rds") %>%
+  mutate(
+    SampleSize = as.integer(SampleSize),
+    Type = factor(trimws(Type), levels = c("Forest", "Grassland"))
+  ) %>%
+  filter(
+    SampleSize %in% c(3, 6, 12),
+    is.finite(Gamma_SC_q0)
+  )
+
+# Average repeated occurrences of the same core subset
+
+points <- raw %>%
+  group_by(Plot, Type, Exploratory, SampleSize, CoreIndices) %>%
+  summarise(
+    Gamma_SC_q0 = mean(Gamma_SC_q0, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Plot-level means and 95% confidence intervals
+
+summary_df <- raw %>%
+  group_by(Plot, Type, SampleSize) %>%
+  summarise(
+    Gamma_SC_q0 = mean(Gamma_SC_q0, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  group_by(Type, SampleSize) %>%
+  summarise(
+    n = n(),
+    mean = mean(Gamma_SC_q0),
+    se = sd(Gamma_SC_q0) / sqrt(n),
+    lo = mean - qt(0.975, n - 1) * se,
+    hi = mean + qt(0.975, n - 1) * se,
+    .groups = "drop"
+  )
+
+cols <- c(
+  Forest = "forestgreen",
+  Grassland = "yellowgreen"
+)
+
+p <- ggplot(points, aes(factor(SampleSize), Gamma_SC_q0)) +
+  geom_point(
+    colour = "grey80",
+    alpha = 0.1,
+    size = 1,
+    position = position_jitter(
+      width = 0.15,
+      height = 0,
+      seed = 1
+    )
+  ) +
+  geom_linerange(
+    data = summary_df,
+    aes(
+      x = factor(SampleSize),
+      ymin = lo,
+      ymax = hi,
+      colour = Type
+    ),
+    inherit.aes = FALSE,
+    linewidth = 1
+  ) +
+  geom_point(
+    data = summary_df,
+    aes(
+      x = factor(SampleSize),
+      y = mean,
+      colour = Type
+    ),
+    inherit.aes = FALSE,
+    size = 3
+  ) +
+  facet_wrap(~ Type, nrow = 1) +
+  scale_colour_manual(values = cols, name = NULL) +
+  scale_y_continuous(
+    labels = scales::label_number(accuracy = 0.01)
+  ) +
+  coord_cartesian(ylim = c(0.90, 1.00)) +
+  labs(
+    x = "Sampling effort",
+    y = "Plot-level sample coverage"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(
+    strip.text = element_blank(),
+    strip.background = element_blank(),
+    legend.position = "bottom",
+    panel.grid.minor = element_blank()
+  )
+
+ggsave(
+  "FigS5_sample_coverage_by_N.png",
+  p,
+  width = 10,
+  height = 6,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  "FigS5_sample_coverage_by_N.pdf",
+  p,
+  width = 10,
+  height = 6,
+  device = cairo_pdf,
+  bg = "white"
+)# Figure S5: Sample coverage across sampling effort
 #            (N = 3, 6, 12) by ecosystem type
 
 library(dplyr)
