@@ -1,105 +1,220 @@
-# Figure 2: ASV richness distributions across ecosystem types at N = 14 cores (individual + composite)
+# Figure 2: ASV richness at N = 14 cores
 #
-# Panels: Sample-level | Plot-level | Plot-level standardized | Composite Samples
+# Main steps:
+# - Calculate richness metrics at maximum sampling effort
+# - Restrict comparisons to plots with both individual and physical composites
+# - Compare Forest and Grassland richness using Gamma-log models
+# - Generate Figure 2 and save statistical summaries
 
 library(dplyr)
 library(tidyr)
 library(ggplot2)
-library(ggtext)
+library(phyloseq)
+library(glmmTMB)
+library(emmeans)
 library(openxlsx)
 
-setwd("path/to/your/16S/data")
+metric_levels <- c(
+  "Individual cores",
+  "Observed plot-level",
+  "Std. observed plot-level",
+  "Physically composited sample"
+)
 
-# -- 1. Load data
-# Aggregate across replicates per plot to avoid pseudoreplication
-sampling_data <- openxlsx::read.xlsx("16S_sampling_curves_individual.xlsx") %>%
+# Individual-core and in silico metrics at N = 14
+
+sampling14 <- readRDS("Sampling_Engel_100reps_updated.rds") %>%
   mutate(
-    SampleSize = as.integer(SampleSize),
-    Type       = factor(trimws(Type), levels = c("Forest", "Grassland")),
-    Plot       = as.character(Plot)
+    Type = factor(trimws(Type), levels = c("Forest", "Grassland")),
+    Exploratory = factor(Exploratory),
+    Plot = as.character(Plot)
   ) %>%
   filter(SampleSize == 14) %>%
-  group_by(Plot, Type) %>%
+  group_by(Plot, Type, Exploratory) %>%
   summarise(
-    Alpha_q0     = mean(Alpha_q0,     na.rm = TRUE),
-    Gamma_q0     = mean(Gamma_q0,     na.rm = TRUE),
-    GammaRare_q0 = mean(GammaRare_q0, na.rm = TRUE),
+    across(c(Alpha_q0, Gamma_q0, GammaRare_q0),
+           ~ mean(.x, na.rm = TRUE)),
     .groups = "drop"
   )
 
-composite_data <- openxlsx::read.xlsx("16S_plot_level_individual_vs_composite.xlsx") %>%
-  mutate(
-    Type = factor(trimws(Type), levels = c("Forest", "Grassland")),
-    Plot = as.character(Plot)
-  )
 
-# -- 2. Plot settings
-pal_type <- c("Forest" = "#228B22", "Grassland" = "#9ACD32")
+# Physical composites from the rarefied phyloseq object
 
-metric_labels <- c(
-  Alpha_q0     = "Individual cores<br><span style='font-size:10pt'>(sample-level, mean, n=14)</span>",
-  Gamma_q0     = "Plot-level<br><span style='font-size:10pt'>(sum, n=14)</span>",
-  GammaRare_q0 = "Plot-level standardized<br><span style='font-size:10pt'>(sum, n=14)</span>",
-  Composite    = "Composite samples<br><span style='font-size:10pt'>(plot-level, true composite)</span>"
+phy <- readRDS("physeq16S_rarefied_8000.rds")
+
+otu <- as(otu_table(phy), "matrix")
+if (taxa_are_rows(phy)) otu <- t(otu)
+
+meta <- data.frame(sample_data(phy), check.names = FALSE)
+meta$Sample <- rownames(meta)
+meta$Plot <- as.character(meta$VIP_Plot)
+meta$Type <- factor(trimws(meta$Type), levels = c("Forest", "Grassland"))
+meta$Exploratory <- factor(meta$Exploratory)
+
+P_samples <- meta$Sample[meta$Pooling == "P"]
+
+composite14 <- data.frame(
+  Sample = P_samples,
+  Plot = meta[P_samples, "Plot"],
+  Type = meta[P_samples, "Type"],
+  Exploratory = meta[P_samples, "Exploratory"],
+  Value = rowSums(otu[P_samples, , drop = FALSE] > 0)
 )
 
-# -- 3. Prepare data
 
-## Individual cores (3 metrics at N=14, averaged across replicates per plot)
-nonpooled14 <- sampling_data %>%
+# Restrict all metrics to the same matched plots
+
+matched_plots <- composite14 %>%
+  distinct(Plot, Type, Exploratory)
+
+sampling14 <- sampling14 %>%
+  semi_join(matched_plots, by = c("Plot", "Type", "Exploratory"))
+
+
+# Prepare long dataset
+
+nonpooled14 <- sampling14 %>%
   pivot_longer(
-    cols      = c(Alpha_q0, Gamma_q0, GammaRare_q0),
-    names_to  = "Metric",
+    c(Alpha_q0, Gamma_q0, GammaRare_q0),
+    names_to = "Metric",
     values_to = "Value"
   ) %>%
-  mutate(Metric = dplyr::recode(Metric,
-    Alpha_q0     = metric_labels[["Alpha_q0"]],
-    Gamma_q0     = metric_labels[["Gamma_q0"]],
-    GammaRare_q0 = metric_labels[["GammaRare_q0"]]
-  )) %>%
-  filter(!is.na(Type), is.finite(Value))
-
-## Composite samples (one true composite per plot)
-composite14 <- composite_data %>%
-  transmute(
-    Plot, Type,
-    Metric = metric_labels[["Composite"]],
-    Value  = Gamma_q0_composite
-  ) %>%
-  filter(!is.na(Type), is.finite(Value))
-
-## Combined
-dat14 <- bind_rows(nonpooled14, composite14) %>%
-  mutate(Metric = factor(Metric, levels = unname(metric_labels)))
-
-y_max <- max(dat14$Value, na.rm = TRUE)
-
-# -- 4. Build figure
-p <- ggplot(dat14, aes(x = Type, y = Value)) +
-  geom_jitter(color = "grey75", alpha = 0.8, size = 2.5,
-              width = 0.15, height = 0) +
-  geom_violin(aes(fill = Type, color = Type),
-              width = 0.85, alpha = 0.45, trim = TRUE) +
-  stat_summary(aes(color = Type),
-               fun.data = mean_sdl, fun.args = list(mult = 1),
-               geom = "pointrange", linewidth = 0.9) +
-  stat_summary(aes(fill = Type),
-               fun = mean, geom = "point",
-               shape = 21, size = 3, color = "black", stroke = 0.5) +
-  scale_fill_manual(values  = pal_type, guide = "none") +
-  scale_color_manual(values = pal_type, guide = "none") +
-  facet_wrap(~ Metric, ncol = 4, scales = "fixed") +
-  coord_cartesian(ylim = c(0, y_max)) +
-  labs(x = "", y = "ASV Richness") +
-  theme_bw(base_size = 16) +
-  theme(
-    strip.background = element_rect(fill = "gray92", color = NA),
-    strip.text       = ggtext::element_markdown(face = "bold", size = 12, lineheight = 1.05),
-    axis.title       = element_text(size = 16),
-    axis.text        = element_text(size = 20)
+  mutate(
+    Metric = recode(
+      Metric,
+      Alpha_q0 = "Individual cores",
+      Gamma_q0 = "Observed plot-level",
+      GammaRare_q0 = "Std. observed plot-level"
+    )
   )
 
-print(p)
+composite14 <- composite14 %>%
+  transmute(
+    Plot, Type, Exploratory,
+    Metric = "Physically composited sample",
+    Value
+  )
 
-ggsave("Fig2_richness_distributions_N14.png", p,
-       width = 12, height = 6, dpi = 600, bg = "white")
+dat14 <- bind_rows(nonpooled14, composite14) %>%
+  filter(is.finite(Value), Value > 0) %>%
+  mutate(Metric = factor(Metric, levels = metric_levels))
+
+
+# Statistical comparisons
+
+run_test <- function(metric_name) {
+
+  d <- filter(dat14, Metric == metric_name)
+
+  m <- glmmTMB(
+    Value ~ Type + Exploratory,
+    data = d,
+    family = Gamma(link = "log")
+  )
+
+  con <- as.data.frame(
+    contrast(emmeans(m, ~ Type, type = "response"), method = "pairwise")
+  )
+
+  desc <- d %>%
+    group_by(Type) %>%
+    summarise(
+      n = n(),
+      mean = mean(Value),
+      sd = sd(Value),
+      .groups = "drop"
+    )
+
+  data.frame(
+    Metric = metric_name,
+    n_Forest = desc$n[desc$Type == "Forest"],
+    mean_Forest = desc$mean[desc$Type == "Forest"],
+    sd_Forest = desc$sd[desc$Type == "Forest"],
+    n_Grassland = desc$n[desc$Type == "Grassland"],
+    mean_Grassland = desc$mean[desc$Type == "Grassland"],
+    sd_Grassland = desc$sd[desc$Type == "Grassland"],
+    ratio = con$ratio,
+    SE = con$SE,
+    z = con$z.ratio,
+    p = con$p.value
+  )
+}
+
+results <- bind_rows(lapply(metric_levels, run_test)) %>%
+  mutate(p_adj = p.adjust(p, method = "holm"))
+
+write.xlsx(
+  list(
+    Results = results,
+    Matched_plots = matched_plots
+  ),
+  "Fig2_stats.xlsx",
+  overwrite = TRUE
+)
+
+
+# Figure 2
+
+pal <- c(
+  Forest = "#228B22",
+  Grassland = "#9ACD32"
+)
+
+p <- ggplot(dat14, aes(Type, Value)) +
+  geom_jitter(
+    colour = "grey65",
+    alpha = 0.75,
+    size = 2.2,
+    width = 0.12
+  ) +
+  geom_violin(
+    aes(fill = Type, colour = Type),
+    width = 0.85,
+    alpha = 0.45,
+    trim = TRUE
+  ) +
+  stat_summary(
+    aes(colour = Type),
+    fun.data = mean_sdl,
+    fun.args = list(mult = 1),
+    geom = "pointrange",
+    linewidth = 0.8
+  ) +
+  stat_summary(
+    aes(fill = Type),
+    fun = mean,
+    geom = "point",
+    shape = 21,
+    size = 3,
+    colour = "black",
+    stroke = 0.5
+  ) +
+  scale_fill_manual(values = pal, guide = "none") +
+  scale_colour_manual(values = pal, guide = "none") +
+  facet_wrap(~ Metric, ncol = 4) +
+  labs(x = NULL, y = "ASV richness") +
+  theme_bw(base_size = 16) +
+  theme(
+    strip.background = element_rect(fill = "grey92", colour = "grey50"),
+    strip.text = element_text(face = "bold"),
+    axis.text.x = element_text(size = 14),
+    panel.grid.minor = element_blank()
+  )
+
+ggsave(
+  "Fig2_richness_N14.png",
+  p,
+  width = 12,
+  height = 6,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  "Fig2_richness_N14.pdf",
+  p,
+  width = 12,
+  height = 6,
+  device = cairo_pdf,
+  bg = "white"
+)
