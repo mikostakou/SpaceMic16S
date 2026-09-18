@@ -1,0 +1,203 @@
+# Figure S10: Observed plot-level richness within the shared spatial range
+# Forest and Grassland predictions at the midpoint of their overlapping
+# maximum pairwise distance for sampling efforts N = 2–6 cores
+
+library(dplyr)
+library(ggplot2)
+library(glmmTMB)
+library(emmeans)
+library(openxlsx)
+
+raw <- readRDS("spatial_subsampling.rds") %>%
+  mutate(
+    SampleSize = as.integer(SampleSize),
+    Type = factor(trimws(Type), levels = c("Forest", "Grassland")),
+    Plot = factor(Plot),
+    Exploratory = factor(Exploratory)
+  )
+
+# Average repeated occurrences of the same core subset
+
+dat <- raw %>%
+  filter(
+    SampleSize %in% 2:6,
+    MaxExtent > 0,
+    is.finite(Gamma_q0),
+    Gamma_q0 > 0
+  ) %>%
+  group_by(
+    Plot, Type, Exploratory,
+    SampleSize, CoreIndices, MaxExtent
+  ) %>%
+  summarise(
+    Gamma_q0 = mean(Gamma_q0, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+
+# Model and prediction at midpoint of shared spatial range
+
+fit_midpoint <- function(N) {
+
+  d <- dat %>%
+    filter(SampleSize == N) %>%
+    droplevels()
+
+  lx <- log(d$MaxExtent)
+  centre <- mean(lx)
+  scale <- sd(lx)
+
+  d$logExtent <- (lx - centre) / scale
+
+  model <- glmmTMB(
+    Gamma_q0 ~ logExtent * Type + Exploratory + (1 | Plot),
+    data = d,
+    family = Gamma(link = "log")
+  )
+
+  ranges <- d %>%
+    group_by(Type) %>%
+    summarise(
+      lo = min(MaxExtent),
+      hi = max(MaxExtent),
+      .groups = "drop"
+    )
+
+  overlap_lo <- max(ranges$lo)
+  overlap_hi <- min(ranges$hi)
+  midpoint <- mean(c(overlap_lo, overlap_hi))
+
+  em <- emmeans(
+    model,
+    ~ Type,
+    at = list(
+      logExtent = (log(midpoint) - centre) / scale
+    ),
+    type = "response"
+  )
+
+  predictions <- as.data.frame(
+    summary(em, infer = TRUE)
+  ) %>%
+    transmute(
+      SampleSize = N,
+      Type,
+      Overlap_lo = overlap_lo,
+      Overlap_hi = overlap_hi,
+      Extent_mid = midpoint,
+      Mean = response,
+      Lower = asymp.LCL,
+      Upper = asymp.UCL
+    )
+
+  contrasts <- as.data.frame(
+    summary(
+      pairs(em),
+      type = "response",
+      infer = TRUE
+    )
+  ) %>%
+    transmute(
+      SampleSize = N,
+      Overlap_lo = overlap_lo,
+      Overlap_hi = overlap_hi,
+      Extent_mid = midpoint,
+      Contrast = contrast,
+      Ratio = ratio,
+      Lower = asymp.LCL,
+      Upper = asymp.UCL,
+      z = z.ratio,
+      p = p.value
+    )
+
+  list(
+    predictions = predictions,
+    contrasts = contrasts
+  )
+}
+
+results <- lapply(2:6, fit_midpoint)
+
+pred <- bind_rows(
+  lapply(results, `[[`, "predictions")
+) %>%
+  mutate(
+    SampleGroup = factor(
+      paste0(SampleSize, " cores"),
+      levels = paste0(2:6, " cores")
+    )
+  )
+
+contrasts <- bind_rows(
+  lapply(results, `[[`, "contrasts")
+) %>%
+  mutate(
+    p_adj = p.adjust(p, method = "holm")
+  )
+
+
+# Figure S10
+
+cols <- c(
+  Forest = "darkgreen",
+  Grassland = "olivedrab"
+)
+
+p <- ggplot(
+  pred,
+  aes(
+    SampleGroup,
+    Mean,
+    colour = Type,
+    group = Type
+  )
+) +
+  geom_linerange(
+    aes(ymin = Lower, ymax = Upper),
+    position = position_dodge(width = 0.35),
+    linewidth = 1
+  ) +
+  geom_point(
+    position = position_dodge(width = 0.35),
+    size = 3
+  ) +
+  scale_colour_manual(
+    values = cols,
+    name = NULL
+  ) +
+  labs(
+    x = "Sampling effort",
+    y = "Observed plot-level richness"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.minor = element_blank()
+  )
+
+ggsave(
+  "FigS10_richness_extent_overlap_midpoint.png",
+  p,
+  width = 7,
+  height = 5.5,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  "FigS10_richness_extent_overlap_midpoint.pdf",
+  p,
+  width = 7,
+  height = 5.5,
+  device = cairo_pdf,
+  bg = "white"
+)
+
+write.xlsx(
+  list(
+    Predictions = pred,
+    Contrasts = contrasts
+  ),
+  "FigS10_stats.xlsx",
+  overwrite = TRUE
+)
