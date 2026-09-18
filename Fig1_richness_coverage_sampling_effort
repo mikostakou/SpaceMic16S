@@ -1,275 +1,293 @@
-# Figure 1: Richness & Coverage vs Sampling Effort (panels a-d)
+# Figure 1: Richness and sample coverage vs sampling effort
 #
-# a: Plot-level richness
-# b: Plot-level richness standardized
-# c: Sample coverage
-# d: Sample coverage standardized
-#
-# Models:
-#   a & b — Gamma GLMM,  log-link:   Value ~ logN * Type + (1|Plot)
-#   c & d — Beta  GLMM, logit-link:  Value ~ SampleSize * Type + (1|Plot)
+# Main steps:
+# - Average repeated simulations within Plot x SampleSize for inference
+# - Fit richness and sample-coverage models
+# - Generate model predictions
+# - Plot unique core subsets and model predictions
+# - Save Figure 1 and statistical summaries
 
-library(tidyr)
+library(dplyr)
 library(ggplot2)
 library(glmmTMB)
+library(emmeans)
+library(performance)
+library(car)
 library(cowplot)
 library(openxlsx)
-library(grid)
 
-setwd("path/to/your/16S/data")
+options(contrasts = c("contr.sum", "contr.poly"))
 
-# -- 1. Load data
-sampling_data <- openxlsx::read.xlsx("16S_sampling_curves_individual.xlsx")
+raw <- readRDS("Sampling_Engel_100reps_updated.rds")
+type_levels <- c("Grassland", "Forest")
 
-# -- 2. Plot settings
-color_scheme <- c("Forest" = "green4", "Grassland" = "yellowgreen")
-type_levels  <- c("Grassland", "Forest")
+# Prepare model data
 
-### Helper: Type labels
-clean_type <- function(x) {
-  x <- trimws(as.character(x))
-  dplyr::case_when(
-    grepl("^forest$",    x, ignore.case = TRUE) ~ "Forest",
-    grepl("^grassland$", x, ignore.case = TRUE) ~ "Grassland",
-    TRUE ~ x
-  )
-}
-
-# -- 3. Prepare long datasets
-
-## 3a. Richness (Gamma_q0, GammaRare_q0)
-rich_long <- sampling_data %>%
+dat <- raw %>%
   mutate(
-    Type       = factor(clean_type(Type), levels = type_levels),
-    Plot       = factor(Plot),
-    SampleSize = as.integer(SampleSize),
-    logN       = log(SampleSize)
-  ) %>%
-  pivot_longer(
-    cols      = c(Gamma_q0, GammaRare_q0),
-    names_to  = "Metric",
-    values_to = "Value"
-  ) %>%
-  mutate(Metric = factor(Metric, levels = c("Gamma_q0", "GammaRare_q0"))) %>%
-  filter(is.finite(Value), Value > 0, SampleSize > 1)
-
-## 3b. Coverage (Gamma_SC_q0, GammaRare_SC_q0)
-cov_long <- sampling_data %>%
-  mutate(
-    Type       = factor(clean_type(Type), levels = type_levels),
-    Plot       = factor(Plot),
+    Type = factor(trimws(Type), levels = type_levels),
+    Exploratory = factor(Exploratory),
+    Plot = factor(Plot),
     SampleSize = as.integer(SampleSize)
   ) %>%
-  pivot_longer(
-    cols      = c(Gamma_SC_q0, GammaRare_SC_q0),
-    names_to  = "Metric",
-    values_to = "Value"
+  group_by(Plot, Type, Exploratory, SampleSize) %>%
+  summarise(
+    across(c(Gamma_q0, GammaRare_q0,
+             Gamma_SC_q0, GammaRare_SC_q0),
+           ~ mean(.x, na.rm = TRUE)),
+    .groups = "drop"
   ) %>%
+  mutate(logN = log(SampleSize))
+
+
+# Fit models
+
+m_q0 <- glmmTMB(
+  Gamma_q0 ~ logN * Type + Exploratory + (1 | Plot),
+  family = Gamma(link = "log"), data = dat
+)
+
+m_q0_8k <- glmmTMB(
+  GammaRare_q0 ~ logN * Type + Exploratory + (1 | Plot),
+  family = Gamma(link = "log"), data = dat
+)
+
+m_cov <- glmmTMB(
+  Gamma_SC_q0 ~ SampleSize * Type + Exploratory + (1 | Plot),
+  family = beta_family(link = "logit"), data = dat
+)
+
+m_cov_8k <- glmmTMB(
+  GammaRare_SC_q0 ~ SampleSize * Type + Exploratory + (1 | Plot),
+  family = beta_family(link = "logit"), data = dat
+)
+
+models <- list(
+  Gamma_q0 = m_q0,
+  GammaRare_q0 = m_q0_8k,
+  Coverage = m_cov,
+  Coverage_8k = m_cov_8k
+)
+
+saveRDS(models, "Fig1_models.rds")
+
+
+# Statistical summaries
+
+get_trends <- function(model, metric, var) {
+  tr <- emtrends(model, ~ Type, var = var)
+
+  list(
+    slopes = as.data.frame(summary(tr, infer = TRUE)) %>%
+      mutate(Metric = metric),
+    contrasts = as.data.frame(summary(pairs(tr), infer = TRUE)) %>%
+      mutate(Metric = metric)
+  )
+}
+
+s1 <- get_trends(m_q0, "Gamma_q0", "logN")
+s2 <- get_trends(m_q0_8k, "GammaRare_q0", "logN")
+s3 <- get_trends(m_cov, "Coverage", "SampleSize")
+s4 <- get_trends(m_cov_8k, "Coverage_8k", "SampleSize")
+
+slopes <- bind_rows(s1$slopes, s2$slopes, s3$slopes, s4$slopes)
+contrasts <- bind_rows(s1$contrasts, s2$contrasts, s3$contrasts, s4$contrasts)
+
+anova_stats <- bind_rows(lapply(names(models), function(x) {
+  a <- as.data.frame(car::Anova(models[[x]], type = 3))
+  data.frame(Metric = x, Effect = rownames(a), a, row.names = NULL)
+}))
+
+r2_stats <- bind_rows(lapply(names(models), function(x) {
+  r <- performance::r2(models[[x]])
+  data.frame(
+    Metric = x,
+    R2_marginal = as.numeric(r$R2_marginal),
+    R2_conditional = as.numeric(r$R2_conditional)
+  )
+}))
+
+write.xlsx(
+  list(
+    Slopes = slopes,
+    Slope_contrasts = contrasts,
+    ANOVA = anova_stats,
+    R2 = r2_stats
+  ),
+  "Fig1_stats.xlsx",
+  overwrite = TRUE
+)
+
+
+# Model predictions
+
+make_preds <- function(model, var) {
+
+  if (var == "logN") {
+    x <- emmeans(
+      model, ~ Type | logN,
+      at = list(logN = log(1:14)),
+      type = "response"
+    )
+  } else {
+    x <- emmeans(
+      model, ~ Type | SampleSize,
+      at = list(SampleSize = 1:14),
+      type = "response"
+    )
+  }
+
+  x <- as.data.frame(summary(x, type = "response"))
+
+  data.frame(
+    Type = x$Type,
+    SampleSize = if (var == "logN") round(exp(x$logN)) else x$SampleSize,
+    Mean = x$response,
+    Lower = x$asymp.LCL,
+    Upper = x$asymp.UCL
+  )
+}
+
+pred_q0 <- make_preds(m_q0, "logN")
+pred_q0_8k <- make_preds(m_q0_8k, "logN")
+pred_cov <- make_preds(m_cov, "SampleSize")
+pred_cov_8k <- make_preds(m_cov_8k, "SampleSize")
+
+
+# Unique core subsets for plotting
+
+points <- raw %>%
   mutate(
-    Metric = factor(Metric, levels = c("Gamma_SC_q0", "GammaRare_SC_q0")),
-    Value  = pmax(1e-4, pmin(Value, 1 - 1e-4))   # strict (0,1) for beta family
+    Type = factor(trimws(Type), levels = type_levels),
+    SampleSize = as.integer(SampleSize)
   ) %>%
-  filter(is.finite(Value), SampleSize > 1)
-
-# -- 4. Fit models
-
-## 4a. Richness — Gamma GLMM, log-link
-m_rich_obs <- glmmTMB(Value ~ logN * Type + (1 | Plot),
-                       data   = filter(rich_long, Metric == "Gamma_q0"),
-                       family = Gamma(link = "log"))
-
-m_rich_std <- glmmTMB(Value ~ logN * Type + (1 | Plot),
-                       data   = filter(rich_long, Metric == "GammaRare_q0"),
-                       family = Gamma(link = "log"))
-
-## 4b. Coverage — Beta GLMM, logit-link
-m_cov_obs  <- glmmTMB(Value ~ SampleSize * Type + (1 | Plot),
-                       data   = filter(cov_long, Metric == "Gamma_SC_q0"),
-                       family = beta_family(link = "logit"))
-
-m_cov_std  <- glmmTMB(Value ~ SampleSize * Type + (1 | Plot),
-                       data   = filter(cov_long, Metric == "GammaRare_SC_q0"),
-                       family = beta_family(link = "logit"))
-
-# -- 5. Prediction grids (fixed effects only)
-base_plot <- levels(rich_long$Plot)[1]
-
-## Helper: richness predictions (log back-transform)
-make_rich_preds <- function(model, dat, metric_name) {
-  grid <- expand.grid(
-    SampleSize = sort(unique(dat$SampleSize)),
-    Type       = levels(dat$Type),
-    Plot       = base_plot,
-    KEEP.OUT.ATTRS = FALSE
-  ) %>% mutate(logN = log(SampleSize))
-
-  pr <- predict(model, newdata = grid, type = "link", se.fit = TRUE, re.form = NA)
-
-  cbind(grid, fit = pr$fit, se = pr$se.fit) %>%
-    transmute(
-      Type, SampleSize,
-      Mean  = exp(fit),
-      Lower = exp(fit - 1.96 * se),
-      Upper = exp(fit + 1.96 * se),
-      Metric = factor(metric_name, levels = levels(rich_long$Metric))
-    )
-}
-
-## Helper: coverage predictions (logistic back-transform)
-make_cov_preds <- function(model, dat, metric_name) {
-  grid <- expand.grid(
-    SampleSize = sort(unique(dat$SampleSize)),
-    Type       = levels(dat$Type),
-    Plot       = base_plot,
-    KEEP.OUT.ATTRS = FALSE
+  group_by(Plot, Type, Exploratory, SampleSize, CoreIndices) %>%
+  summarise(
+    across(c(Gamma_q0, GammaRare_q0,
+             Gamma_SC_q0, GammaRare_SC_q0),
+           ~ mean(.x, na.rm = TRUE)),
+    .groups = "drop"
   )
 
-  pr <- predict(model, newdata = grid, type = "link", se.fit = TRUE, re.form = NA)
 
-  cbind(grid, fit = pr$fit, se = pr$se.fit) %>%
-    transmute(
-      Type, SampleSize,
-      Mean  = plogis(fit),
-      Lower = plogis(fit - 1.96 * se),
-      Upper = plogis(fit + 1.96 * se),
-      Metric = factor(metric_name, levels = levels(cov_long$Metric))
-    )
-}
+# Figure settings
 
-preds_rich <- bind_rows(
-  make_rich_preds(m_rich_obs, filter(rich_long, Metric == "Gamma_q0"),     "Gamma_q0"),
-  make_rich_preds(m_rich_std, filter(rich_long, Metric == "GammaRare_q0"), "GammaRare_q0")
-)
+point_cols <- c(Grassland = "yellowgreen", Forest = "green4")
+line_cols <- c(Grassland = "olivedrab", Forest = "darkgreen")
 
-preds_cov <- bind_rows(
-  make_cov_preds(m_cov_obs, filter(cov_long, Metric == "Gamma_SC_q0"),     "Gamma_SC_q0"),
-  make_cov_preds(m_cov_std, filter(cov_long, Metric == "GammaRare_SC_q0"), "GammaRare_SC_q0")
-)
-
-# -- 6. Build individual panels
-panel_aspect    <- 1
-reserved_left   <- 30
-panel_margin    <- margin(t = 10, r = 10, b = 10, l = reserved_left)
-legend_override <- list(alpha = 1, shape = 16, size = 4, linewidth = 1.2)
-
-base_theme <- theme_bw(base_size = 16) +
+base_theme <- theme_bw(base_size = 13) +
   theme(
-    panel.grid.major.x = element_blank(),
-    legend.position    = "none",
-    aspect.ratio       = panel_aspect,
-    plot.margin        = panel_margin,
-    axis.title.y       = element_blank(),
-    axis.text.y        = element_text(margin = margin(r = 6)),
-    axis.title.x       = element_text(margin = margin(t = 10)),
-    axis.text.x        = element_text(margin = margin(t = 2))
+    panel.grid.major = element_line(colour = "grey90", linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 15),
+    legend.position = "none",
+    aspect.ratio = 1
   )
 
-## Helper: generic point + ribbon + line panel
-make_panel <- function(points_dat, preds_dat, y_limits) {
-  ggplot() +
-    geom_point(
-      data = points_dat,
-      aes(SampleSize, Value, color = Type),
-      alpha = 0.01, size = 1.5,
-      position = position_jitter(width = 0.1)
-    ) +
+make_panel <- function(yvar, pred, ylab, ylim = NULL) {
+
+  p <- ggplot() +
     geom_ribbon(
-      data = preds_dat,
+      data = pred,
       aes(SampleSize, ymin = Lower, ymax = Upper, fill = Type),
-      alpha = 0.3, color = NA
+      alpha = 0.25, colour = NA
+    ) +
+    geom_point(
+      data = points,
+      aes(SampleSize, .data[[yvar]], colour = Type),
+      alpha = 0.035, size = 1.1,
+      position = position_jitter(width = 0.08, height = 0, seed = 1)
     ) +
     geom_line(
-      data  = filter(preds_dat, Type == "Forest"),
+      data = filter(pred, Type == "Grassland"),
       aes(SampleSize, Mean),
-      color = "darkgreen", linewidth = 1
+      colour = line_cols["Grassland"], linewidth = 1.15
     ) +
     geom_line(
-      data  = filter(preds_dat, Type == "Grassland"),
+      data = filter(pred, Type == "Forest"),
       aes(SampleSize, Mean),
-      color = "olivedrab", linewidth = 1
+      colour = line_cols["Forest"], linewidth = 1.15
     ) +
-    scale_color_manual(values = color_scheme, name = "") +
-    scale_fill_manual(values  = color_scheme, guide = "none") +
-    coord_cartesian(ylim = y_limits) +
-    labs(x = "Sampling Effort", y = NULL) +
+    scale_colour_manual(values = point_cols, guide = "none") +
+    scale_fill_manual(values = point_cols, guide = "none") +
+    scale_x_continuous(breaks = c(1, 3, 5, 7, 9, 11, 14)) +
+    labs(x = "Sampling effort", y = ylab) +
     base_theme
+
+  if (!is.null(ylim)) p <- p + coord_cartesian(ylim = ylim)
+  p
 }
 
-ylims_rich <- range(c(rich_long$Value, preds_rich$Lower, preds_rich$Upper), na.rm = TRUE)
-ylims_cov  <- range(c(cov_long$Value,  preds_cov$Lower,  preds_cov$Upper),  na.rm = TRUE)
 
-set.seed(1)
-pA <- make_panel(filter(rich_long, Metric == "Gamma_q0"),
-                 filter(preds_rich, Metric == "Gamma_q0"),        ylims_rich)
-pB <- make_panel(filter(rich_long, Metric == "GammaRare_q0"),
-                 filter(preds_rich, Metric == "GammaRare_q0"),    ylims_rich)
-pC <- make_panel(filter(cov_long,  Metric == "Gamma_SC_q0"),
-                 filter(preds_cov,  Metric == "Gamma_SC_q0"),     ylims_cov)
-pD <- make_panel(filter(cov_long,  Metric == "GammaRare_SC_q0"),
-                 filter(preds_cov,  Metric == "GammaRare_SC_q0"), ylims_cov)
+# Panels
 
-# -- 7. Assemble composite figure
-
-## Force identical panel areas
-aligned <- cowplot::align_plots(pA, pB, pC, pD, align = "hv", axis = "tblr")
-
-## Add y-axis titles manually (pixel-aligned across all panels)
-add_ytitle <- function(p, ylab) {
-  ggdraw(p) +
-    draw_label(ylab, x = 0.05, y = 0.5, angle = 90,
-               hjust = 0.5, vjust = 0.5, size = 16) +
-    theme(plot.background = element_rect(fill = "white", color = NA),
-          plot.margin = margin(0, 0, 0, 0))
-}
-
-pA_w <- add_ytitle(aligned[[1]], "Plot-level richness")
-pB_w <- add_ytitle(aligned[[2]], "Plot-level richness standardized")
-pC_w <- add_ytitle(aligned[[3]], "Sample coverage")
-pD_w <- add_ytitle(aligned[[4]], "Sample coverage standardized")
-
-## Row assembly with panel labels
-top_row <- plot_grid(pA_w, pB_w, nrow = 1) %>%
-  ggdraw() +
-  draw_plot_label(c("a","b"), x = c(0.01,0.51), y = c(0.99,0.99),
-                  hjust = 0, vjust = 1, size = 18) +
-  theme(plot.background = element_rect(fill = "white", color = NA))
-
-bot_row <- plot_grid(pC_w, pD_w, nrow = 1) %>%
-  ggdraw() +
-  draw_plot_label(c("c","d"), x = c(0.01,0.51), y = c(0.99,0.99),
-                  hjust = 0, vjust = 1, size = 18) +
-  theme(plot.background = element_rect(fill = "white", color = NA))
-
-## Shared legend
-legend_src <- ggplot(filter(preds_cov, Metric == "Gamma_SC_q0")) +
-  geom_line(aes(SampleSize, Mean, color = Type), linewidth = 1) +
-  scale_color_manual(values = color_scheme, name = "") +
-  theme_void() +
-  theme(legend.position = "bottom",
-        legend.text = element_text(size = 12),
-        legend.key.size = unit(1.1, "cm"),
-        legend.spacing.x = unit(0.6, "cm")) +
-  guides(color = guide_legend(
-    override.aes = list(shape = 16, size = 3, linewidth = 1, alpha = 1),
-    nrow = 1
-  ))
-
-extract_legend <- function(p) {
-  g   <- ggplotGrob(p)
-  idx <- which(sapply(g$grobs, function(x) x$name) == "guide-box")
-  g$grobs[[idx[1]]]
-}
-
-legend_row <- ggdraw(extract_legend(legend_src)) +
-  theme(plot.background = element_rect(fill = "white", color = NA),
-        plot.margin = margin(0, 0, 0, 0))
-
-## Final figure
-fig1 <- plot_grid(
-  top_row, bot_row, legend_row,
-  ncol = 1,
-  rel_heights = c(1, 1, 0.18)
+rich_y <- range(
+  c(points$Gamma_q0, points$GammaRare_q0,
+    pred_q0$Lower, pred_q0$Upper,
+    pred_q0_8k$Lower, pred_q0_8k$Upper),
+  na.rm = TRUE
 )
 
-print(fig1)
-ggsave("Fig1.png", fig1, width = 10, height = 10, dpi = 600, bg = "white")
+cov_y <- range(
+  c(points$Gamma_SC_q0, points$GammaRare_SC_q0),
+  na.rm = TRUE
+)
+
+pA <- make_panel("Gamma_q0", pred_q0,
+                 "Observed plot-level richness", rich_y)
+
+pB <- make_panel("GammaRare_q0", pred_q0_8k,
+                 "Std. observed plot-level richness", rich_y)
+
+pC <- make_panel("Gamma_SC_q0", pred_cov,
+                 "Plot-level sample coverage", c(cov_y[1], 1.01))
+
+pD <- make_panel("GammaRare_SC_q0", pred_cov_8k,
+                 "Std. plot-level sample coverage", c(cov_y[1], 1.01))
+
+
+# Assemble figure
+
+top <- plot_grid(
+  pA, pB, labels = c("a", "b"),
+  label_size = 18, align = "hv", axis = "tblr"
+)
+
+bottom <- plot_grid(
+  pC, pD, labels = c("c", "d"),
+  label_size = 18, align = "hv", axis = "tblr"
+)
+
+legend_plot <- ggplot(
+  pred_q0,
+  aes(SampleSize, Mean, colour = Type)
+) +
+  geom_line(linewidth = 1.2) +
+  scale_colour_manual(values = line_cols, name = NULL) +
+  theme_void() +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size = 13)
+  )
+
+fig1 <- plot_grid(
+  top,
+  bottom,
+  get_legend(legend_plot),
+  ncol = 1,
+  rel_heights = c(1, 1, 0.08)
+)
+
+ggsave(
+  "Fig1_sampling_effort.png",
+  fig1,
+  width = 10, height = 10, dpi = 600, bg = "white"
+)
+
+ggsave(
+  "Fig1_sampling_effort.pdf",
+  fig1,
+  width = 10, height = 10,
+  device = cairo_pdf, bg = "white"
+)
