@@ -1,286 +1,416 @@
-# Figure 5: Richness & Coverage vs Spatial Extent (panels a-d)
+# Figure 5: Richness and sample coverage vs spatial extent
 #
-# a: Plot-level richness
-# b: Plot-level richness standardized
-# c: Sample coverage
-# d: Sample coverage standardized
-#
-# Models:
-#   a & b — Gamma GLMM, log-link:   Value ~ log(Extent) * Type + (1|Plot)
-#   c & d — Beta  GLMM, logit-link: Value ~ log(Extent) * Type + (1|Plot)
+# Main steps:
+# - Estimate one spatial slope per plot while controlling for sampling effort
+# - Compare plot-level slopes between ecosystems
+# - Generate descriptive relationships for Figure 5
+# - Save Figure 5 and statistical summaries
 
 library(dplyr)
-library(tidyr)
 library(ggplot2)
-library(glmmTMB)
+library(emmeans)
+library(car)
+library(clubSandwich)
 library(cowplot)
 library(openxlsx)
-library(grid)
 
-setwd("path/to/your/16S/data")
+options(contrasts = c("contr.sum", "contr.poly"))
 
-# -- 1. Load data
-sampling_data <- openxlsx::read.xlsx("16S_sampling_curves_individual.xlsx")
+raw <- readRDS("Sampling_Engel_100reps_updated.rds")
 
-# -- 2. Plot settings
-color_scheme <- c("Forest" = "green4", "Grassland" = "yellowgreen")
-type_levels  <- c("Grassland", "Forest")
-line_cols    <- c("Forest" = "darkgreen", "Grassland" = "olivedrab")
+responses <- c(
+  "Gamma_q0", "GammaRare_q0",
+  "Gamma_SC_q0", "GammaRare_SC_q0"
+)
 
-# -- 3. Prepare long datasets
-
-## 3a. Plot-level Richness (Gamma_q0, GammaRare_q0)
-rich_long <- sampling_data %>%
+dat <- raw %>%
   mutate(
-    Type   = factor(trimws(Type), levels = type_levels),
-    Plot   = factor(Plot),
-    Extent = as.numeric(Extent)
+    Type = factor(trimws(Type), levels = c("Grassland", "Forest")),
+    Exploratory = factor(Exploratory),
+    Plot = factor(Plot),
+    SampleSize = as.integer(SampleSize),
+    CoreKey = CoreIndices
   ) %>%
-  pivot_longer(
-    cols      = c(Gamma_q0, GammaRare_q0),
-    names_to  = "Metric",
-    values_to = "Value"
+  group_by(
+    Plot, Type, Exploratory, SampleSize,
+    CoreKey, MaxExtent_m
   ) %>%
-  mutate(Metric = factor(Metric, levels = c("Gamma_q0", "GammaRare_q0"))) %>%
-  filter(is.finite(Value), Value > 0, is.finite(Extent), Extent > 0)
-
-## 3b. Sample Coverage (Gamma_SC_q0, GammaRare_SC_q0)
-cov_long <- sampling_data %>%
+  summarise(
+    across(all_of(responses), ~ mean(.x, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  filter(SampleSize > 1, MaxExtent_m > 0) %>%
   mutate(
-    Type   = factor(trimws(Type), levels = type_levels),
-    Plot   = factor(Plot),
-    Extent = as.numeric(Extent)
-  ) %>%
-  pivot_longer(
-    cols      = c(Gamma_SC_q0, GammaRare_SC_q0),
-    names_to  = "Metric",
-    values_to = "Value"
-  ) %>%
-  mutate(
-    Metric = factor(Metric, levels = c("Gamma_SC_q0", "GammaRare_SC_q0")),
-    Value  = pmax(1e-6, pmin(Value, 1 - 1e-6))   # (0,1) for beta family
-  ) %>%
-  filter(is.finite(Value), is.finite(Extent), Extent > 0)
+    SampleSizeF = factor(SampleSize),
+    logX = log(MaxExtent_m)
+  )
 
-# -- 4. Fit models
 
-## 4a. Plot-level Richness — Gamma GLMM, log-link
-m_rich_obs <- glmmTMB(Value ~ log(Extent) * Type + (1 | Plot),
-                       data   = filter(rich_long, Metric == "Gamma_q0"),
-                       family = Gamma(link = "log"))
+# Estimate one spatial slope per plot
 
-m_rich_std <- glmmTMB(Value ~ log(Extent) * Type + (1 | Plot),
-                       data   = filter(rich_long, Metric == "GammaRare_q0"),
-                       family = Gamma(link = "log"))
+fit_plot_slope <- function(d, response, coverage = FALSE) {
 
-## 4b. Sample Coverage — Beta GLMM, logit-link
-m_cov_obs  <- glmmTMB(Value ~ log(Extent) * Type + (1 | Plot),
-                       data   = filter(cov_long, Metric == "Gamma_SC_q0"),
-                       family = beta_family(link = "logit"))
+  d$Y <- if (coverage) qlogis(d[[response]]) else log(d[[response]])
 
-m_cov_std  <- glmmTMB(Value ~ log(Extent) * Type + (1 | Plot),
-                       data   = filter(cov_long, Metric == "GammaRare_SC_q0"),
-                       family = beta_family(link = "logit"))
+  fit <- lm(
+    Y ~ logX + SampleSizeF,
+    data = d
+  )
 
-# -- 5. Prediction grids (fixed effects only, clipped per Type)
-base_plot <- levels(rich_long$Plot)[1]
+  data.frame(
+    Slope = coef(fit)["logX"]
+  )
+}
 
-## Helper: prediction grid clipped to observed Extent range per Type
-clip_grid_by_type <- function(dat, n = 250) {
-  rng <- dat %>%
+specs <- data.frame(
+  Response = responses,
+  Coverage = c(FALSE, FALSE, TRUE, TRUE)
+)
+
+plot_slopes <- bind_rows(
+  lapply(seq_len(nrow(specs)), function(i) {
+
+    dat %>%
+      group_by(Plot, Type, Exploratory) %>%
+      group_modify(
+        ~ fit_plot_slope(
+          .x,
+          specs$Response[i],
+          specs$Coverage[i]
+        )
+      ) %>%
+      ungroup() %>%
+      mutate(Response = specs$Response[i])
+  })
+)
+
+
+# Compare spatial slopes between ecosystems
+
+second_stage <- lapply(responses, function(response) {
+
+  d <- filter(
+    plot_slopes,
+    Response == response,
+    is.finite(Slope)
+  )
+
+  model <- lm(
+    Slope ~ Type + Exploratory,
+    data = d
+  )
+
+  emm <- emmeans(model, ~ Type)
+
+  list(
+    means = as.data.frame(summary(emm, infer = TRUE)) %>%
+      mutate(Response = response),
+    contrast = as.data.frame(summary(pairs(emm), infer = TRUE)) %>%
+      mutate(Response = response),
+    anova = {
+      a <- as.data.frame(car::Anova(model, type = 3))
+      data.frame(
+        Response = response,
+        Term = rownames(a),
+        a,
+        row.names = NULL
+      )
+    }
+  )
+})
+
+names(second_stage) <- responses
+
+slope_means <- bind_rows(lapply(second_stage, `[[`, "means"))
+slope_contrasts <- bind_rows(lapply(second_stage, `[[`, "contrast"))
+anova_stats <- bind_rows(lapply(second_stage, `[[`, "anova"))
+
+write.xlsx(
+  list(
+    Plot_slopes = plot_slopes,
+    Slope_means = slope_means,
+    Ecosystem_contrasts = slope_contrasts,
+    TypeIII = anova_stats
+  ),
+  "Fig5_stats.xlsx",
+  overwrite = TRUE
+)
+
+
+# Descriptive models for figure curves
+
+fit_vis <- function(response, coverage = FALSE) {
+
+  x <- dat %>%
+    filter(is.finite(.data[[response]]))
+
+  if (coverage) {
+    x <- filter(x, .data[[response]] > 0, .data[[response]] < 1)
+  }
+
+  x$Y <- if (coverage) qlogis(x[[response]]) else log(x[[response]])
+
+  model <- lm(
+    Y ~ logX * Type + Exploratory,
+    data = x
+  )
+
+  attr(model, "dat") <- x
+  model
+}
+
+m1 <- fit_vis("Gamma_q0")
+m2 <- fit_vis("GammaRare_q0")
+m3 <- fit_vis("Gamma_SC_q0", TRUE)
+m4 <- fit_vis("GammaRare_SC_q0", TRUE)
+
+
+# Predictions averaged across Exploratories
+
+make_preds <- function(model, back = c("exp", "plogis"), n = 120) {
+
+  back <- match.arg(back)
+  x <- attr(model, "dat")
+  b <- coef(model)
+
+  V <- as.matrix(
+    vcovCR(model, cluster = x$Plot, type = "CR2")
+  )[names(b), names(b), drop = FALSE]
+
+  crit <- qt(0.975, n_distinct(x$Plot) - 1)
+  expl <- levels(x$Exploratory)
+
+  ranges <- x %>%
     group_by(Type) %>%
     summarise(
-      xmin = min(Extent[Extent > 0], na.rm = TRUE),
-      xmax = max(Extent, na.rm = TRUE),
+      xmin = min(MaxExtent_m),
+      xmax = max(MaxExtent_m),
       .groups = "drop"
-    ) %>%
-    mutate(xmin = pmax(xmin, .Machine$double.eps))
-
-  bind_rows(lapply(seq_len(nrow(rng)), function(i) {
-    data.frame(
-      Type   = rng$Type[i],
-      Extent = seq(rng$xmin[i], rng$xmax[i], length.out = n),
-      Plot   = base_plot,
-      stringsAsFactors = FALSE
     )
-  })) %>%
+
+  grid <- bind_rows(
+    lapply(seq_len(nrow(ranges)), function(i) {
+
+      xs <- seq(
+        ranges$xmin[i],
+        ranges$xmax[i],
+        length.out = n
+      )
+
+      expand.grid(
+        Type = as.character(ranges$Type[i]),
+        MaxExtent_m = xs,
+        Exploratory = expl
+      ) %>%
+        mutate(
+          pred_id = rep(seq_along(xs), times = length(expl)) +
+            (i - 1) * n
+        )
+    })
+  ) %>%
     mutate(
-      Type = factor(Type, levels = levels(dat$Type)),
-      Plot = factor(Plot, levels = levels(dat$Plot))
+      Type = factor(Type, levels = levels(x$Type)),
+      Exploratory = factor(Exploratory, levels = expl),
+      logX = log(MaxExtent_m)
+    )
+
+  X <- model.matrix(delete.response(terms(model)), grid)
+  X <- X[, names(b), drop = FALSE]
+
+  Xbar <- rowsum(X, grid$pred_id, reorder = FALSE) / length(expl)
+
+  meta <- grid %>%
+    group_by(pred_id) %>%
+    summarise(
+      Type = first(Type),
+      MaxExtent_m = first(MaxExtent_m),
+      .groups = "drop"
+    )
+
+  eta <- drop(Xbar %*% b)
+  se <- sqrt(rowSums((Xbar %*% V) * Xbar))
+  f <- if (back == "exp") exp else plogis
+
+  meta %>%
+    mutate(
+      estimate = f(eta),
+      lower = f(eta - crit * se),
+      upper = f(eta + crit * se)
     )
 }
 
-## Helper: safe predict on link scale (falls back to manual matrix multiply)
-safe_predict_link <- function(mod, newdata) {
-  out <- try(
-    predict(mod, newdata = newdata, type = "link", se.fit = TRUE, re.form = NA),
-    silent = TRUE
-  )
-  if (!inherits(out, "try-error")) return(list(eta = out$fit, se = out$se.fit))
+p1 <- make_preds(m1, "exp")
+p2 <- make_preds(m2, "exp")
+p3 <- make_preds(m3, "plogis")
+p4 <- make_preds(m4, "plogis")
 
-  X   <- model.matrix(delete.response(terms(mod)), newdata)
-  V   <- vcov(mod)$cond
-  bet <- fixef(mod)$cond
-  list(
-    eta = as.numeric(X %*% bet),
-    se  = sqrt(rowSums((X %*% V) * X))
-  )
-}
 
-## Helper: full predict pipeline for one metric
-make_preds <- function(model, dat, metric_name, metric_levels, inv_fun) {
-  grid <- clip_grid_by_type(dat)
-  pr   <- safe_predict_link(model, grid)
+# Figure settings
 
-  cbind(grid, eta = pr$eta, se = pr$se) %>%
-    transmute(
-      Type, Extent,
-      Mean  = inv_fun(eta),
-      Lower = inv_fun(eta - 1.96 * se),
-      Upper = inv_fun(eta + 1.96 * se),
-      Metric = factor(metric_name, levels = metric_levels)
-    ) %>%
-    arrange(Type, Extent)
-}
-
-preds_rich <- bind_rows(
-  make_preds(m_rich_obs, filter(rich_long, Metric == "Gamma_q0"),
-             "Gamma_q0",     levels(rich_long$Metric), exp),
-  make_preds(m_rich_std, filter(rich_long, Metric == "GammaRare_q0"),
-             "GammaRare_q0", levels(rich_long$Metric), exp)
+point_cols <- c(
+  Grassland = "yellowgreen",
+  Forest = "green4"
 )
 
-preds_cov <- bind_rows(
-  make_preds(m_cov_obs, filter(cov_long, Metric == "Gamma_SC_q0"),
-             "Gamma_SC_q0",     levels(cov_long$Metric), plogis),
-  make_preds(m_cov_std, filter(cov_long, Metric == "GammaRare_SC_q0"),
-             "GammaRare_SC_q0", levels(cov_long$Metric), plogis)
+line_cols <- c(
+  Grassland = "olivedrab",
+  Forest = "darkgreen"
 )
 
-# -- 6. Build individual panels
-panel_aspect    <- 1
-reserved_left   <- 30
-panel_margin    <- margin(t = 10, r = 10, b = 10, l = reserved_left)
-legend_override <- list(alpha = 1, shape = 16, size = 4, linewidth = 1.2)
-
-base_theme <- theme_bw(base_size = 16) +
+theme_fig <- theme_bw(base_size = 13) +
   theme(
-    panel.grid.major.x = element_blank(),
-    legend.position    = "none",
-    aspect.ratio       = panel_aspect,
-    plot.margin        = panel_margin,
-    axis.title.y       = element_blank(),
-    axis.text.y        = element_text(margin = margin(r = 6)),
-    axis.title.x       = element_text(margin = margin(t = 10)),
-    axis.text.x        = element_text(margin = margin(t = 2))
+    panel.grid.major = element_line(colour = "grey90", linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 15),
+    legend.position = "none",
+    aspect.ratio = 1
   )
 
-## Helper: build one panel 
-make_panel <- function(points_dat, preds_dat, y_limits) {
+make_panel <- function(response, pred, ylim, breaks, ylab) {
+
   ggplot() +
-    geom_point(
-      data = points_dat,
-      aes(Extent, Value, color = Type),
-      alpha = 0.01, size = 1,
-      position = position_jitter(width = 0.1, height = 0)
-    ) +
     geom_ribbon(
-      data = preds_dat,
-      aes(Extent, ymin = Lower, ymax = Upper, fill = Type),
-      alpha = 0.50, color = NA
+      data = pred,
+      aes(MaxExtent_m, ymin = lower, ymax = upper, fill = Type),
+      alpha = 0.30,
+      colour = NA
+    ) +
+    geom_point(
+      data = filter(dat, Type == "Grassland"),
+      aes(MaxExtent_m, .data[[response]]),
+      colour = point_cols["Grassland"],
+      alpha = 0.05,
+      size = 0.9
+    ) +
+    geom_point(
+      data = filter(dat, Type == "Forest"),
+      aes(MaxExtent_m, .data[[response]]),
+      colour = point_cols["Forest"],
+      alpha = 0.05,
+      size = 0.9
     ) +
     geom_line(
-      data  = filter(preds_dat, Type == "Forest"),
-      aes(Extent, Mean),
-      color = line_cols[["Forest"]], linewidth = 1
+      data = filter(pred, Type == "Grassland"),
+      aes(MaxExtent_m, estimate),
+      colour = line_cols["Grassland"],
+      linewidth = 1.15
     ) +
     geom_line(
-      data  = filter(preds_dat, Type == "Grassland"),
-      aes(Extent, Mean),
-      color = line_cols[["Grassland"]], linewidth = 1
+      data = filter(pred, Type == "Forest"),
+      aes(MaxExtent_m, estimate),
+      colour = line_cols["Forest"],
+      linewidth = 1.15
     ) +
-    scale_color_manual(values = color_scheme, name = "") +
-    scale_fill_manual(values  = color_scheme, guide = "none") +
-    coord_cartesian(ylim = y_limits) +
-    labs(x = "Spatial extent (m)", y = NULL) +
-    base_theme
+    scale_fill_manual(values = point_cols, guide = "none") +
+    scale_x_continuous(
+      limits = c(0, 36),
+      breaks = c(0, 6, 12, 18, 24, 30, 36)
+    ) +
+    scale_y_continuous(breaks = breaks) +
+    coord_cartesian(ylim = ylim) +
+    labs(
+      x = "Maximum pairwise distance (m)",
+      y = ylab
+    ) +
+    theme_fig
 }
 
-ylims_rich <- range(c(rich_long$Value, preds_rich$Lower, preds_rich$Upper), na.rm = TRUE)
-ylims_cov  <- c(0.5, 1.02)
 
-set.seed(1)
-pA <- make_panel(filter(rich_long,  Metric == "Gamma_q0"),
-                 filter(preds_rich, Metric == "Gamma_q0"), ylims_rich)
-pB <- make_panel(filter(rich_long,  Metric == "GammaRare_q0"),
-                 filter(preds_rich, Metric == "GammaRare_q0"), ylims_rich)
-pC <- make_panel(filter(cov_long,   Metric == "Gamma_SC_q0"),
-                 filter(preds_cov,  Metric == "Gamma_SC_q0"), ylims_cov)
-pD <- make_panel(filter(cov_long,   Metric == "GammaRare_SC_q0"),
-                 filter(preds_cov,  Metric == "GammaRare_SC_q0"), ylims_cov)
+# Figure panels
 
-# -- 7. Assemble figure
-
-## Force identical panel areas
-aligned <- cowplot::align_plots(pA, pB, pC, pD, align = "hv", axis = "tblr")
-
-## Add y-axis titles manually (pixel-aligned across all panels)
-add_ytitle <- function(p, ylab) {
-  ggdraw(p) +
-    draw_label(ylab, x = 0.05, y = 0.5, angle = 90,
-               hjust = 0.5, vjust = 0.5, size = 16) +
-    theme(plot.background = element_rect(fill = "white", color = NA),
-          plot.margin = margin(0, 0, 0, 0))
-}
-
-pA_w <- add_ytitle(aligned[[1]], "Plot-level richness")
-pB_w <- add_ytitle(aligned[[2]], "Plot-level richness standardized")
-pC_w <- add_ytitle(aligned[[3]], "Sample coverage")
-pD_w <- add_ytitle(aligned[[4]], "Sample coverage standardized")
-
-## Assembly with panel labels
-top_row <- plot_grid(pA_w, pB_w, nrow = 1) %>%
-  ggdraw() +
-  draw_plot_label(c("a","b"), x = c(0.01,0.51), y = c(0.99,0.99),
-                  hjust = 0, vjust = 1, size = 18) +
-  theme(plot.background = element_rect(fill = "white", color = NA))
-
-bot_row <- plot_grid(pC_w, pD_w, nrow = 1) %>%
-  ggdraw() +
-  draw_plot_label(c("c","d"), x = c(0.01,0.51), y = c(0.99,0.99),
-                  hjust = 0, vjust = 1, size = 18) +
-  theme(plot.background = element_rect(fill = "white", color = NA))
-
-## Shared legend
-legend_src <- ggplot(filter(preds_cov, Metric == "Gamma_SC_q0")) +
-  geom_line(aes(Extent, Mean, color = Type), linewidth = 1) +
-  scale_color_manual(values = color_scheme, name = "") +
-  theme_void() +
-  theme(legend.position = "bottom",
-        legend.text = element_text(size = 12),
-        legend.key.size = unit(1.1, "cm"),
-        legend.spacing.x = unit(0.6, "cm")) +
-  guides(color = guide_legend(
-    override.aes = list(shape = 16, size = 3, linewidth = 1, alpha = 1),
-    nrow = 1
-  ))
-
-extract_legend <- function(p) {
-  g   <- ggplotGrob(p)
-  idx <- which(sapply(g$grobs, function(x) x$name) == "guide-box")
-  g$grobs[[idx[1]]]
-}
-
-legend_row <- ggdraw(extract_legend(legend_src)) +
-  theme(plot.background = element_rect(fill = "white", color = NA),
-        plot.margin = margin(0, 0, 0, 0))
-
-## Final figure
-fig5 <- plot_grid(
-  top_row, bot_row, legend_row,
-  ncol = 1,
-  rel_heights = c(1, 1, 0.18)
+ylim_A <- c(
+  0,
+  ceiling(max(dat$Gamma_q0, p1$upper, na.rm = TRUE) / 1000) * 1000
 )
 
-ggsave("Fig5_richness_coverage_extent.png", fig5,
-       width = 10, height = 10, dpi = 600, bg = "white")
+ylim_B <- c(
+  0,
+  ceiling(max(dat$GammaRare_q0, p2$upper, na.rm = TRUE) / 500) * 500
+)
+
+ylim_C <- ylim_D <- c(0.80, 1.005)
+
+A <- make_panel(
+  "Gamma_q0", p1,
+  ylim_A, seq(0, ylim_A[2], 2000),
+  "Observed plot-level richness"
+)
+
+B <- make_panel(
+  "GammaRare_q0", p2,
+  ylim_B, seq(0, ylim_B[2], 1000),
+  "Std. observed plot-level richness"
+)
+
+C <- make_panel(
+  "Gamma_SC_q0", p3,
+  ylim_C, c(0.80, 0.85, 0.90, 0.95, 1),
+  "Plot-level sample coverage"
+)
+
+D <- make_panel(
+  "GammaRare_SC_q0", p4,
+  ylim_D, c(0.80, 0.85, 0.90, 0.95, 1),
+  "Std. plot-level sample coverage"
+)
+
+
+# Assemble Figure 5
+
+top <- plot_grid(
+  A, B,
+  labels = c("a", "b"),
+  label_size = 18,
+  align = "hv",
+  axis = "tblr"
+)
+
+bottom <- plot_grid(
+  C, D,
+  labels = c("c", "d"),
+  label_size = 18,
+  align = "hv",
+  axis = "tblr"
+)
+
+legend_plot <- ggplot(
+  p1,
+  aes(MaxExtent_m, estimate, colour = Type)
+) +
+  geom_line(linewidth = 1.2) +
+  scale_colour_manual(values = line_cols, name = NULL) +
+  theme_void() +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size = 13)
+  )
+
+fig5 <- plot_grid(
+  top,
+  bottom,
+  get_legend(legend_plot),
+  ncol = 1,
+  rel_heights = c(1, 1, 0.08)
+)
+
+
+# Save Figure 5
+
+ggsave(
+  "Fig5_spatial_extent.png",
+  fig5,
+  width = 10,
+  height = 10,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  "Fig5_spatial_extent.pdf",
+  fig5,
+  width = 10,
+  height = 10,
+  device = cairo_pdf,
+  bg = "white"
+)
