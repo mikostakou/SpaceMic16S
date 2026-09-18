@@ -1,0 +1,114 @@
+# Figure S8: Richness-accumulation ratio across sampling effort
+# Ratio = observed plot-level richness / sample-level richness
+
+library(dplyr)
+library(ggplot2)
+
+raw <- readRDS("spatial_subsampling.rds") %>%
+  mutate(
+    SampleSize = as.integer(SampleSize),
+    Type = factor(trimws(Type), levels = c("Forest", "Grassland")),
+    Ratio_q0 = Gamma_q0 / Alpha_q0
+  ) %>%
+  filter(
+    SampleSize %in% c(3, 6, 12),
+    is.finite(Ratio_q0),
+    Ratio_q0 > 0
+  )
+
+# Average repeated occurrences of the same core subset
+
+points <- raw %>%
+  group_by(Plot, Type, Exploratory, SampleSize, CoreIndices) %>%
+  summarise(
+    Ratio_q0 = mean(Ratio_q0, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Plot-level means and 95% confidence intervals
+
+summary_df <- raw %>%
+  group_by(Plot, Type, SampleSize) %>%
+  summarise(
+    Ratio_q0 = mean(Ratio_q0, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  group_by(Type, SampleSize) %>%
+  summarise(
+    n = n(),
+    mean = mean(Ratio_q0),
+    se = sd(Ratio_q0) / sqrt(n),
+    lo = mean - qt(0.975, n - 1) * se,
+    hi = mean + qt(0.975, n - 1) * se,
+    .groups = "drop"
+  )
+
+cols <- c(
+  Forest = "forestgreen",
+  Grassland = "yellowgreen"
+)
+
+p <- ggplot(points, aes(factor(SampleSize), Ratio_q0)) +
+  geom_point(
+    colour = "grey80",
+    alpha = 0.10,
+    size = 1,
+    position = position_jitter(
+      width = 0.15,
+      height = 0,
+      seed = 1
+    )
+  ) +
+  geom_errorbar(
+    data = summary_df,
+    aes(
+      x = factor(SampleSize),
+      ymin = lo,
+      ymax = hi,
+      colour = Type
+    ),
+    inherit.aes = FALSE,
+    width = 0.20,
+    linewidth = 1
+  ) +
+  geom_point(
+    data = summary_df,
+    aes(
+      x = factor(SampleSize),
+      y = mean,
+      colour = Type
+    ),
+    inherit.aes = FALSE,
+    size = 3
+  ) +
+  facet_wrap(~ Type, nrow = 1) +
+  scale_colour_manual(values = cols, name = NULL) +
+  labs(
+    x = "Sampling effort",
+    y = "Plot-level / sample-level richness"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(
+    strip.text = element_blank(),
+    strip.background = element_blank(),
+    legend.position = "bottom",
+    panel.grid.minor = element_blank()
+  )
+
+ggsave(
+  "FigS8_richness_accumulation_ratio.png",
+  p,
+  width = 10,
+  height = 6,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  "FigS8_richness_accumulation_ratio.pdf",
+  p,
+  width = 10,
+  height = 6,
+  device = cairo_pdf,
+  bg = "white"
+)
