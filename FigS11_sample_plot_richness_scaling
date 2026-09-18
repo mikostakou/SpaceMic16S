@@ -1,0 +1,187 @@
+# Figure S11: Continuous relationship between sample- and plot-level richness
+# accounting for spatial extent and sampling effort
+
+library(dplyr)
+library(ggplot2)
+library(mgcv)
+library(ggnewscale)
+
+raw <- readRDS("spatial_subsampling.rds") %>%
+  mutate(
+    Type = factor(trimws(Type), levels = c("Grassland", "Forest")),
+    Plot = factor(Plot),
+    Exploratory = factor(Exploratory),
+    SampleSize = as.integer(SampleSize)
+  )
+
+# Average repeated occurrences of the same core subset
+
+dat <- raw %>%
+  filter(
+    SampleSize > 1,
+    MaxExtent > 0,
+    Alpha_q0 > 0,
+    Gamma_q0 > 0
+  ) %>%
+  group_by(
+    Plot, Type, Exploratory,
+    SampleSize, CoreIndices, MaxExtent
+  ) %>%
+  summarise(
+    Alpha_q0 = mean(Alpha_q0, na.rm = TRUE),
+    Gamma_q0 = mean(Gamma_q0, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+
+# Model
+
+model <- gam(
+  Gamma_q0 ~
+    Type +
+    s(Alpha_q0, by = Type, k = 7, bs = "cs") +
+    s(MaxExtent, by = Type, k = 5, bs = "cs") +
+    factor(SampleSize) +
+    Exploratory +
+    s(Plot, bs = "re"),
+  data = dat,
+  family = Gamma(link = "log"),
+  method = "REML"
+)
+
+
+# Predictions at N = 7 and median spatial extent
+
+make_preds <- function(type_name) {
+
+  d <- filter(dat, Type == type_name)
+
+  alpha <- seq(
+    quantile(d$Alpha_q0, 0.01),
+    quantile(d$Alpha_q0, 0.99),
+    length.out = 300
+  )
+
+  grid <- expand.grid(
+    Alpha_q0 = alpha,
+    Exploratory = levels(dat$Exploratory)
+  ) %>%
+    mutate(
+      MaxExtent = median(d$MaxExtent),
+      SampleSize = 7L,
+      Type = factor(type_name, levels = levels(dat$Type)),
+      Exploratory = factor(Exploratory, levels = levels(dat$Exploratory)),
+      Plot = factor(levels(dat$Plot)[1], levels = levels(dat$Plot)),
+      pred_id = rep(seq_along(alpha), times = nlevels(dat$Exploratory))
+    )
+
+  X <- predict(
+    model,
+    newdata = grid,
+    type = "lpmatrix",
+    exclude = "s(Plot)"
+  )
+
+  Xbar <- rowsum(X, grid$pred_id, reorder = FALSE) /
+    nlevels(dat$Exploratory)
+
+  beta <- coef(model)
+  V <- vcov(model)
+
+  eta <- drop(Xbar %*% beta)
+  se <- sqrt(rowSums((Xbar %*% V) * Xbar))
+
+  data.frame(
+    Alpha_q0 = alpha,
+    Type = factor(type_name, levels = levels(dat$Type)),
+    fit = exp(eta),
+    lower = exp(eta - 1.96 * se),
+    upper = exp(eta + 1.96 * se)
+  )
+}
+
+pred <- bind_rows(
+  make_preds("Grassland"),
+  make_preds("Forest")
+)
+
+
+# Figure S11
+
+line_cols <- c(
+  Grassland = "yellowgreen",
+  Forest = "green4"
+)
+
+p <- ggplot(dat, aes(Alpha_q0, Gamma_q0)) +
+  geom_point(
+    aes(colour = MaxExtent),
+    size = 1.8,
+    alpha = 0.2
+  ) +
+  scale_colour_gradient(
+    low = "#ADD8E6",
+    high = "#3B6FB6",
+    name = "Maximum extent (m)"
+  ) +
+  geom_ribbon(
+    data = pred,
+    aes(
+      x = Alpha_q0,
+      ymin = lower,
+      ymax = upper,
+      group = Type
+    ),
+    inherit.aes = FALSE,
+    fill = "grey92",
+    alpha = 0.18
+  ) +
+  ggnewscale::new_scale_colour() +
+  geom_line(
+    data = pred,
+    aes(Alpha_q0, fit, colour = Type),
+    inherit.aes = FALSE,
+    linewidth = 1.6
+  ) +
+  scale_colour_manual(
+    values = line_cols,
+    name = NULL
+  ) +
+  facet_wrap(~ Type, nrow = 1) +
+  scale_y_log10(
+    labels = scales::label_number()
+  ) +
+  labs(
+    x = "Sample-level richness",
+    y = "Observed plot-level richness"
+  ) +
+  theme_bw(base_size = 15) +
+  theme(
+    legend.position = "right",
+    axis.title = element_text(size = 17),
+    axis.text = element_text(size = 14),
+    strip.text = element_blank(),
+    strip.background = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+
+# Save Figure S11
+
+ggsave(
+  "FigS11_plot_vs_sample_richness.png",
+  p,
+  width = 10,
+  height = 6,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  "FigS11_plot_vs_sample_richness.pdf",
+  p,
+  width = 10,
+  height = 6,
+  device = cairo_pdf,
+  bg = "white"
+)
