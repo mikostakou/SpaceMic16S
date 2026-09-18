@@ -1,79 +1,204 @@
-# Figure 4: Plot-level richness standardization ratio (GammaRare_q0 / Gamma_q0) across sampling effort
+# Figure 4: Standardized / observed plot-level richness ratio
 #
-# Ratio: plot-level standardized / plot-level observed richness
-
+# Main steps:
+# - Calculate plot-level richness ratios at 3, 6 and 12 cores
+# - Test ecosystem and sampling-effort effects using a Beta GLMM
+# - Estimate trends with increasing sampling effort
+# - Generate Figure 4 and save statistical summaries
 
 library(dplyr)
 library(ggplot2)
+library(glmmTMB)
+library(emmeans)
+library(car)
 library(openxlsx)
 
-setwd("path/to/your/16S/data")
+options(contrasts = c("contr.sum", "contr.poly"))
 
-# -- 1. Load and prepare data
-sampling_data <- openxlsx::read.xlsx("16S_sampling_curves_individual.xlsx") %>%
-  mutate(SampleSize = as.integer(SampleSize)) %>%
-  filter(SampleSize %in% c(3, 6, 12)) %>%
+raw <- readRDS("Sampling_Engel_100reps_updated.rds")
+
+
+# Prepare plot-level data
+
+dat <- raw %>%
   mutate(
-    SampleSizeF = factor(SampleSize, levels = c(3, 6, 12), labels = c("3", "6", "12")),
-    Type        = factor(Type, levels = c("Forest", "Grassland"))
+    Type = factor(trimws(Type), levels = c("Grassland", "Forest")),
+    Plot = factor(Plot),
+    Exploratory = factor(Exploratory),
+    SampleSize = as.integer(SampleSize),
+    Ratio_q0 = GammaRare_q0 / Gamma_q0
   ) %>%
-  filter(!is.na(Gamma_q0), !is.na(GammaRare_q0), Gamma_q0 > 0) %>%
-  mutate(Ratio_q0 = GammaRare_q0 / Gamma_q0) %>%
-  filter(is.finite(Ratio_q0))
-
-# -- 2. Plot settings
-type_cols <- c("Forest" = "forestgreen", "Grassland" = "yellowgreen")
-
-# -- 3. Summary stats (mean + 95% CI per Type x SampleSize)
-plot_means <- sampling_data %>%
-  group_by(Type, SampleSizeF, Plot) %>%
-  summarise(Ratio_mean = mean(Ratio_q0, na.rm = TRUE), .groups = "drop")
-
-sum_df <- plot_means %>%
-  group_by(Type, SampleSizeF) %>%
+  filter(
+    SampleSize %in% c(3, 6, 12),
+    is.finite(Ratio_q0),
+    Ratio_q0 > 0
+  ) %>%
+  group_by(Plot, Type, Exploratory, SampleSize) %>%
   summarise(
-    n_plots = n(),
-    mean    = mean(Ratio_mean),
-    sd      = sd(Ratio_mean),
-    se      = sd / sqrt(n_plots),
-    tcrit   = qt(0.975, df = pmax(n_plots - 1, 1)),
-    ci_lo   = mean - tcrit * se,
-    ci_hi   = mean + tcrit * se,
+    Ratio_q0 = mean(Ratio_q0, na.rm = TRUE),
     .groups = "drop"
+  ) %>%
+  mutate(
+    SampleSizeF = factor(SampleSize, levels = c(3, 6, 12)),
+    log2N = log2(SampleSize)
   )
 
-# -- 4. Build figure
+
+# Model sampling-effort classes
+
+m <- glmmTMB(
+  Ratio_q0 ~ SampleSizeF * Type + Exploratory + (1 | Plot),
+  data = dat,
+  family = beta_family(link = "logit")
+)
+
+pred <- as.data.frame(
+  summary(
+    emmeans(m, ~ SampleSizeF | Type, type = "response"),
+    infer = TRUE
+  )
+)
+
+type_contrasts <- as.data.frame(
+  summary(
+    pairs(
+      emmeans(m, ~ Type | SampleSizeF),
+      adjust = "holm"
+    ),
+    infer = TRUE
+  )
+)
+
+type3 <- as.data.frame(car::Anova(m, type = 3))
+type3$Term <- rownames(type3)
+rownames(type3) <- NULL
+
+
+# Trend with sampling effort
+
+m_trend <- glmmTMB(
+  Ratio_q0 ~ log2N * Type + Exploratory + (1 | Plot),
+  data = dat,
+  family = beta_family(link = "logit")
+)
+
+trends <- emtrends(m_trend, ~ Type, var = "log2N")
+
+slopes <- as.data.frame(
+  summary(trends, infer = TRUE)
+)
+
+slope_contrast <- as.data.frame(
+  summary(pairs(trends), infer = TRUE)
+)
+
+
+# Save statistics
+
+write.xlsx(
+  list(
+    Predictions = pred,
+    Type_contrasts = type_contrasts,
+    Trend_slopes = slopes,
+    Trend_contrast = slope_contrast,
+    TypeIII = type3
+  ),
+  "Fig4_stats.xlsx",
+  overwrite = TRUE
+)
+
+
+# Figure settings
+
+cols <- c(
+  Grassland = "yellowgreen",
+  Forest = "forestgreen"
+)
+
+dark_cols <- c(
+  Grassland = "olivedrab",
+  Forest = "darkgreen"
+)
+
 set.seed(1)
-p <- ggplot(sampling_data, aes(SampleSizeF, Ratio_q0)) +
+
+p <- ggplot(dat, aes(SampleSizeF, Ratio_q0)) +
+
+  geom_jitter(
+    data = filter(dat, Type == "Grassland"),
+    colour = cols["Grassland"],
+    size = 1.6,
+    alpha = 0.3,
+    width = 0.10
+  ) +
+
+  geom_jitter(
+    data = filter(dat, Type == "Forest"),
+    colour = cols["Forest"],
+    size = 1.6,
+    alpha = 0.3,
+    width = 0.10
+  ) +
+
+  geom_linerange(
+    data = pred,
+    aes(
+      x = SampleSizeF,
+      ymin = asymp.LCL,
+      ymax = asymp.UCL,
+      colour = Type
+    ),
+    inherit.aes = FALSE,
+    linewidth = 0.9
+  ) +
+
   geom_point(
-    color = "grey80", alpha = 0.1, size = 1,
-    position = position_jitter(width = 0.18, height = 0),
-    na.rm = TRUE
+    data = pred,
+    aes(
+      x = SampleSizeF,
+      y = response,
+      fill = Type,
+      colour = Type
+    ),
+    inherit.aes = FALSE,
+    shape = 21,
+    size = 3.2,
+    stroke = 0.9
   ) +
-  geom_errorbar(
-    data = sum_df, inherit.aes = FALSE,
-    aes(SampleSizeF, ymin = ci_lo, ymax = ci_hi, color = Type),
-    width = 0.21, linewidth = 1, na.rm = TRUE
-  ) +
-  geom_point(
-    data = sum_df, inherit.aes = FALSE,
-    aes(SampleSizeF, mean, color = Type),
-    size = 3, na.rm = TRUE
-  ) +
+
   facet_wrap(~ Type, nrow = 1) +
-  scale_color_manual(values = type_cols, name = NULL) +
+
+  scale_fill_manual(values = cols, guide = "none") +
+  scale_colour_manual(values = dark_cols, name = NULL) +
+
   labs(
-    x = "Sampling Effort",
-    y = "Plot-level richness (standardized / unstandardized)"
+    x = "Sampling effort",
+    y = "Standardized / observed\nplot-level richness ratio"
   ) +
-  theme_bw(base_size = 17) +
+
+  theme_bw(base_size = 14) +
   theme(
-    strip.text         = element_blank(),
-    strip.background   = element_blank(),
-    legend.position    = "bottom",
-    axis.title.y       = element_text(size = 17)
+    strip.text = element_blank(),
+    strip.background = element_blank(),
+    legend.position = "bottom",
+    axis.text = element_text(size = 14),
+    panel.grid.minor = element_blank()
   )
 
-print(p)
-ggsave("Fig4_richness_standardization_ratio.png", p,
-       width = 10, height = 6, dpi = 600)
+ggsave(
+  "Fig4_richness_standardization_ratio.png",
+  p,
+  width = 8,
+  height = 5,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  "Fig4_richness_standardization_ratio.pdf",
+  p,
+  width = 8,
+  height = 5,
+  device = cairo_pdf,
+  bg = "white"
+)
