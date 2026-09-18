@@ -1,0 +1,202 @@
+# Figure S7: Richness distributions across sampling effort
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(openxlsx)
+
+raw <- readRDS("spatial_subsampling.rds") %>%
+  mutate(
+    Plot = as.character(Plot),
+    Type = factor(trimws(Type), levels = c("Forest", "Grassland")),
+    SampleSize = as.integer(SampleSize)
+  ) %>%
+  filter(SampleSize %in% c(3, 6, 12, 14))
+
+# Average repeated occurrences of the same core subset
+
+points <- raw %>%
+  group_by(Plot, Type, Exploratory, SampleSize, CoreIndices) %>%
+  summarise(
+    across(
+      c(Alpha_q0, Gamma_q0, GammaRare_q0),
+      ~ mean(.x, na.rm = TRUE)
+    ),
+    .groups = "drop"
+  )
+
+# One value per biological plot
+
+plots <- raw %>%
+  group_by(Plot, Type, Exploratory, SampleSize) %>%
+  summarise(
+    across(
+      c(Alpha_q0, Gamma_q0, GammaRare_q0),
+      ~ mean(.x, na.rm = TRUE)
+    ),
+    .groups = "drop"
+  )
+
+# Matched physical composites
+
+physical <- read.xlsx("Fig3_physical_vs_synthetic_8k.xlsx") %>%
+  mutate(
+    Plot = as.character(Plot),
+    Type = factor(trimws(Type), levels = c("Forest", "Grassland"))
+  )
+
+# Use the same matched plots at N = 14
+
+matched <- physical$Plot
+
+points <- points %>%
+  filter(SampleSize != 14 | Plot %in% matched)
+
+plots <- plots %>%
+  filter(SampleSize != 14 | Plot %in% matched)
+
+
+# Prepare long data
+
+metric_labels <- c(
+  Alpha_q0 = "Individual cores",
+  Gamma_q0 = "Observed plot-level",
+  GammaRare_q0 = "Std. observed plot-level"
+)
+
+metric_levels <- c(
+  unname(metric_labels),
+  "Physically composited sample"
+)
+
+sample_levels <- as.character(c(3, 6, 12, 14))
+
+make_long <- function(x) {
+  x %>%
+    pivot_longer(
+      c(Alpha_q0, Gamma_q0, GammaRare_q0),
+      names_to = "Variable",
+      values_to = "Value"
+    ) %>%
+    mutate(
+      Metric = factor(
+        metric_labels[Variable],
+        levels = metric_levels
+      ),
+      SampleRow = factor(
+        as.character(SampleSize),
+        levels = sample_levels
+      )
+    )
+}
+
+points_long <- make_long(points)
+plots_long <- make_long(plots)
+
+physical_long <- physical %>%
+  transmute(
+    Plot,
+    Type,
+    Exploratory,
+    SampleSize = 14L,
+    Metric = factor(
+      "Physically composited sample",
+      levels = metric_levels
+    ),
+    SampleRow = factor("14", levels = sample_levels),
+    Value = Physical_q0
+  )
+
+points_long <- bind_rows(points_long, physical_long)
+plots_long <- bind_rows(plots_long, physical_long)
+
+
+# Figure S7
+
+mean_sd <- function(x) {
+  data.frame(
+    y = mean(x),
+    ymin = mean(x) - sd(x),
+    ymax = mean(x) + sd(x)
+  )
+}
+
+cols <- c(
+  Forest = "#228B22",
+  Grassland = "#9ACD32"
+)
+
+p <- ggplot() +
+  geom_jitter(
+    data = points_long,
+    aes(Type, Value),
+    colour = "grey65",
+    alpha = 0.15,
+    size = 1.4,
+    width = 0.12
+  ) +
+  geom_violin(
+    data = plots_long,
+    aes(Type, Value, fill = Type, colour = Type),
+    alpha = 0.4,
+    width = 0.85,
+    trim = TRUE
+  ) +
+  stat_summary(
+    data = plots_long,
+    aes(Type, Value, colour = Type),
+    fun.data = mean_sd,
+    geom = "pointrange",
+    linewidth = 0.8
+  ) +
+  stat_summary(
+    data = plots_long,
+    aes(Type, Value, fill = Type),
+    fun = mean,
+    geom = "point",
+    shape = 21,
+    size = 3,
+    colour = "black"
+  ) +
+  scale_fill_manual(values = cols, guide = "none") +
+  scale_colour_manual(values = cols, guide = "none") +
+  facet_grid(
+    SampleRow ~ Metric,
+    drop = FALSE
+  ) +
+  labs(
+    x = NULL,
+    y = "ASV richness"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    strip.background = element_rect(
+      fill = "grey92",
+      colour = "black"
+    ),
+    strip.text = element_text(
+      face = "bold",
+      size = 11
+    ),
+    axis.title.y = element_text(size = 16),
+    axis.text = element_text(size = 13),
+    panel.grid.minor = element_blank()
+  )
+
+ggsave(
+  "FigS7_richness_distributions.png",
+  p,
+  width = 11,
+  height = 10,
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  "FigS7_richness_distributions.pdf",
+  p,
+  width = 11,
+  height = 10,
+  device = cairo_pdf,
+  bg = "white"
+)
