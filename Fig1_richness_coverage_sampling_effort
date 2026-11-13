@@ -16,9 +16,9 @@ library(car)
 library(cowplot)
 library(openxlsx)
 
-options(contrasts = c("contr.sum", "contr.poly"))
 
-raw <- readRDS("Sampling_Engel_100reps_updated.rds")
+
+raw <- readRDS("spatial_subsampling.rds")
 type_levels <- c("Grassland", "Forest")
 
 # Prepare model data
