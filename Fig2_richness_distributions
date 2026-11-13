@@ -23,7 +23,7 @@ metric_levels <- c(
 
 # Individual-core and in silico metrics at N = 14
 
-sampling14 <- readRDS("Sampling_Engel_100reps_updated.rds") %>%
+sampling14 <- readRDS("spatial_subsampling.rds") %>%
   mutate(
     Type = factor(trimws(Type), levels = c("Forest", "Grassland")),
     Exploratory = factor(Exploratory),
